@@ -68,7 +68,8 @@ Python 3.12 or newer is required. From Windows PowerShell:
 
 ```powershell
 cd ai-platform-demo
-py -3.12 -m venv .venv
+python --version
+python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
 python -m pip install -e ".[dev]"
