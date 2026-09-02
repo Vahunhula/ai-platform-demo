@@ -25,6 +25,7 @@ def test_rejects_duplicate_task_ids(tmp_path: Path) -> None:
         "description": "Duplicate task",
         "difficulty": "low",
         "acceptance_criteria": ["Rejected"],
+        "verification": {"type": "pytest", "targets": ["tests/test_duplicate.py"]},
     }
     tasks_path = tmp_path / "tasks.json"
     tasks_path.write_text(json.dumps([task, task]), encoding="utf-8")

@@ -14,6 +14,7 @@ def _task() -> TaskDefinition:
         description="Exercise persistence",
         difficulty=TaskDifficulty.LOW,
         acceptance_criteria=["State survives a new storage instance"],
+        verification={"type": "pytest", "targets": ["tests/test_example.py"]},
     )
 
 

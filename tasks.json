@@ -8,7 +8,11 @@
       "\"Welcome\" is spelled correctly",
       "all existing tests pass",
       "no unrelated files are modified"
-    ]
+    ],
+    "verification": {
+      "type": "pytest",
+      "targets": ["tests/test_messages.py"]
+    }
   },
   {
     "id": "DEMO-2",
@@ -19,7 +23,11 @@
       "quantity > 10 returns a 10% discount",
       "quantities of 10 or less retain existing behavior",
       "all tests pass"
-    ]
+    ],
+    "verification": {
+      "type": "pytest",
+      "targets": ["tests/test_discounts.py"]
+    }
   },
   {
     "id": "DEMO-3",
@@ -31,6 +39,10 @@
       "duplicated formatting logic is removed",
       "existing behavior expected by tests is preserved",
       "all tests pass"
-    ]
+    ],
+    "verification": {
+      "type": "pytest",
+      "targets": ["tests/test_users.py"]
+    }
   }
 ]
