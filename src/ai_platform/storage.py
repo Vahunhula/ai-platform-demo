@@ -7,8 +7,9 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from time import monotonic, sleep
 
-from ai_platform.events import Event, EventType
+from ai_platform.events import ActorType, Event, EventType
 from ai_platform.models import (
     ExecutionKind,
     ModelSelection,
@@ -59,8 +60,17 @@ class SQLiteStorage:
 
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as connection:
-            connection.execute("PRAGMA journal_mode = WAL")
-            connection.execute("PRAGMA synchronous = NORMAL")
+            deadline = monotonic() + (_BUSY_TIMEOUT_MILLISECONDS / 1000)
+            while True:
+                try:
+                    connection.execute("PRAGMA journal_mode = WAL")
+                    connection.execute("PRAGMA synchronous = NORMAL")
+                    break
+                except sqlite3.OperationalError as error:
+                    if "locked" not in str(error).lower() or monotonic() >= deadline:
+                        raise
+                    connection.rollback()
+                    sleep(0.05)
         with self._connect(immediate=True) as connection:
             connection.execute(
                 """
@@ -76,7 +86,12 @@ class SQLiteStorage:
                     workspace_path TEXT,
                     active_execution TEXT,
                     execution_owner TEXT,
+                    execution_id TEXT,
+                    execution_actor_id TEXT,
+                    execution_pid INTEGER,
+                    execution_hostname TEXT,
                     execution_started_at TEXT,
+                    execution_heartbeat_at TEXT,
                     pause_requested INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
@@ -204,7 +219,10 @@ class SQLiteStorage:
                 SET status = ?, selected_tier = NULL, selected_model = NULL,
                     attempt = 0, verification_status = ?, workspace_path = NULL,
                     active_execution = NULL, execution_owner = NULL,
-                    execution_started_at = NULL, pause_requested = 0, updated_at = ?
+                    execution_id = NULL, execution_actor_id = NULL,
+                    execution_pid = NULL, execution_hostname = NULL,
+                    execution_started_at = NULL, execution_heartbeat_at = NULL,
+                    pause_requested = 0, updated_at = ?
                 WHERE task_id = ?
                 """,
                 (
@@ -219,24 +237,7 @@ class SQLiteStorage:
         """Append and return an event. No update or delete event API exists."""
 
         with self._connect() as connection:
-            cursor = connection.execute(
-                """
-                INSERT INTO events (
-                    id, task_id, timestamp, event_type, actor_type, actor_id, metadata_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    event.id,
-                    event.task_id,
-                    event.timestamp.isoformat(),
-                    event.event_type.value,
-                    event.actor_type.value,
-                    event.actor_id,
-                    json.dumps(event.metadata, sort_keys=True),
-                ),
-            )
-            sequence_id = int(cursor.lastrowid)
-        event.sequence_id = sequence_id
+            self._insert_event(connection, event)
         return event
 
     def get_events(self, task_id: str) -> list[Event]:
@@ -294,6 +295,11 @@ class SQLiteStorage:
         owner: str,
         *,
         allowed_statuses: set[TaskStatus],
+        execution_id: str | None = None,
+        actor_id: str | None = None,
+        process_id: int | None = None,
+        hostname: str | None = None,
+        acquired_at: datetime | None = None,
     ) -> bool:
         """Atomically acquire the one-writer workspace lock for a task."""
 
@@ -301,19 +307,120 @@ class SQLiteStorage:
             return False
         placeholders = ", ".join("?" for _ in allowed_statuses)
         statuses = sorted(status.value for status in allowed_statuses)
-        now = datetime.now(UTC).isoformat()
+        now = (acquired_at or datetime.now(UTC)).isoformat()
         with self._connect(immediate=True) as connection:
             cursor = connection.execute(
                 f"""
                 UPDATE tasks
-                SET active_execution = ?, execution_owner = ?, execution_started_at = ?,
-                    updated_at = ?
+                SET active_execution = ?, execution_owner = ?, execution_id = ?,
+                    execution_actor_id = ?, execution_pid = ?, execution_hostname = ?,
+                    execution_started_at = ?, execution_heartbeat_at = ?, updated_at = ?
                 WHERE task_id = ? AND active_execution IS NULL AND pause_requested = 0
                   AND status IN ({placeholders})
                 """,
-                (kind.value, owner, now, now, task_id, *statuses),
+                (
+                    kind.value,
+                    owner,
+                    execution_id or owner,
+                    actor_id or owner,
+                    process_id,
+                    hostname,
+                    now,
+                    now,
+                    now,
+                    task_id,
+                    *statuses,
+                ),
             )
             return cursor.rowcount == 1
+
+    def heartbeat_execution(
+        self,
+        task_id: str,
+        owner: str,
+        *,
+        heartbeat_at: datetime | None = None,
+    ) -> bool:
+        """Refresh a lock lease only when its opaque owner token still matches."""
+
+        heartbeat = (heartbeat_at or datetime.now(UTC)).isoformat()
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE tasks
+                SET execution_heartbeat_at = ?, updated_at = ?
+                WHERE task_id = ? AND execution_owner = ?
+                """,
+                (heartbeat, heartbeat, task_id, owner),
+            )
+            return cursor.rowcount == 1
+
+    def recover_execution(
+        self,
+        task_id: str,
+        expected_owner: str,
+        expected_heartbeat: datetime | None,
+        *,
+        audit_event: Event,
+    ) -> tuple[TaskStatus, TaskStatus] | None:
+        """Atomically clear a stale lock, pause, and append its audit events."""
+
+        expected = expected_heartbeat.isoformat() if expected_heartbeat else None
+        with self._connect(immediate=True) as connection:
+            row = connection.execute(
+                """
+                SELECT status FROM tasks
+                WHERE task_id = ? AND execution_owner = ?
+                  AND execution_heartbeat_at IS ?
+                """,
+                (task_id, expected_owner, expected),
+            ).fetchone()
+            if row is None:
+                return None
+            previous = TaskStatus(row["status"])
+            current = TaskStatus.PAUSED_BY_HUMAN
+            cursor = connection.execute(
+                """
+                UPDATE tasks
+                SET status = ?, active_execution = NULL, execution_owner = NULL,
+                    execution_id = NULL, execution_actor_id = NULL,
+                    execution_pid = NULL, execution_hostname = NULL,
+                    execution_started_at = NULL, execution_heartbeat_at = NULL,
+                    pause_requested = 0, updated_at = ?
+                WHERE task_id = ? AND execution_owner = ?
+                  AND execution_heartbeat_at IS ?
+                """,
+                (
+                    current.value,
+                    datetime.now(UTC).isoformat(),
+                    task_id,
+                    expected_owner,
+                    expected,
+                ),
+            )
+            if cursor.rowcount != 1:
+                return None
+            if audit_event.task_id != task_id:
+                raise ValueError("Recovery audit event belongs to a different task")
+            self._insert_event(connection, audit_event)
+            if previous is not current:
+                self._insert_event(
+                    connection,
+                    Event(
+                        task_id=task_id,
+                        event_type=EventType.STATUS_CHANGED,
+                        actor_type=ActorType.SYSTEM,
+                        actor_id="execution-lock-manager",
+                        metadata={
+                            "from": previous.value,
+                            "to": current.value,
+                            "reason": (
+                                "Previous execution appears to have terminated unexpectedly"
+                            ),
+                        },
+                    ),
+                )
+            return (previous, current)
 
     def release_execution(self, task_id: str, owner: str) -> tuple[TaskStatus, TaskStatus] | None:
         """Release a writer lock and finalize a pause requested during an agent turn."""
@@ -336,7 +443,10 @@ class SQLiteStorage:
                 """
                 UPDATE tasks
                 SET status = ?, active_execution = NULL, execution_owner = NULL,
-                    execution_started_at = NULL, pause_requested = 0, updated_at = ?
+                    execution_id = NULL, execution_actor_id = NULL,
+                    execution_pid = NULL, execution_hostname = NULL,
+                    execution_started_at = NULL, execution_heartbeat_at = NULL,
+                    pause_requested = 0, updated_at = ?
                 WHERE task_id = ? AND execution_owner = ?
                 """,
                 (current.value, datetime.now(UTC).isoformat(), task_id, owner),
@@ -410,7 +520,12 @@ class SQLiteStorage:
             workspace_path=row["workspace_path"],
             active_execution=row["active_execution"],
             execution_owner=row["execution_owner"],
+            execution_id=row["execution_id"],
+            execution_actor_id=row["execution_actor_id"],
+            execution_pid=row["execution_pid"],
+            execution_hostname=row["execution_hostname"],
             execution_started_at=row["execution_started_at"],
+            execution_heartbeat_at=row["execution_heartbeat_at"],
             pause_requested=bool(row["pause_requested"]),
             created_at=row["created_at"],
             updated_at=row["updated_at"],
@@ -442,6 +557,26 @@ class SQLiteStorage:
                 raise KeyError(task_id)
 
     @staticmethod
+    def _insert_event(connection: sqlite3.Connection, event: Event) -> None:
+        cursor = connection.execute(
+            """
+            INSERT INTO events (
+                id, task_id, timestamp, event_type, actor_type, actor_id, metadata_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                event.id,
+                event.task_id,
+                event.timestamp.isoformat(),
+                event.event_type.value,
+                event.actor_type.value,
+                event.actor_id,
+                json.dumps(event.metadata, sort_keys=True),
+            ),
+        )
+        event.sequence_id = int(cursor.lastrowid)
+
+    @staticmethod
     def _migrate_task_columns(connection: sqlite3.Connection) -> None:
         columns = {row["name"] for row in connection.execute("PRAGMA table_info(tasks)")}
         migrations = {
@@ -452,7 +587,14 @@ class SQLiteStorage:
             "workspace_path": "ALTER TABLE tasks ADD COLUMN workspace_path TEXT",
             "active_execution": "ALTER TABLE tasks ADD COLUMN active_execution TEXT",
             "execution_owner": "ALTER TABLE tasks ADD COLUMN execution_owner TEXT",
+            "execution_id": "ALTER TABLE tasks ADD COLUMN execution_id TEXT",
+            "execution_actor_id": "ALTER TABLE tasks ADD COLUMN execution_actor_id TEXT",
+            "execution_pid": "ALTER TABLE tasks ADD COLUMN execution_pid INTEGER",
+            "execution_hostname": "ALTER TABLE tasks ADD COLUMN execution_hostname TEXT",
             "execution_started_at": "ALTER TABLE tasks ADD COLUMN execution_started_at TEXT",
+            "execution_heartbeat_at": (
+                "ALTER TABLE tasks ADD COLUMN execution_heartbeat_at TEXT"
+            ),
             "pause_requested": (
                 "ALTER TABLE tasks ADD COLUMN pause_requested INTEGER NOT NULL DEFAULT 0"
             ),

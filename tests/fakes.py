@@ -7,13 +7,19 @@ from ai_platform.executors.base import (
     ExecutionResult,
     ExecutorPreflight,
 )
+from ai_platform.models import ModelTier
 
 
 class FakeAgentExecutor:
     """Optionally make the known tiny fix on a configured attempt."""
 
-    def __init__(self, fix_on_attempt: int | None = 1) -> None:
+    def __init__(
+        self,
+        fix_on_attempt: int | None = 1,
+        fix_on_tier: ModelTier | None = None,
+    ) -> None:
         self.fix_on_attempt = fix_on_attempt
+        self.fix_on_tier = fix_on_tier
         self.requests: list[ExecutionRequest] = []
 
     def preflight(self) -> ExecutorPreflight:
@@ -25,7 +31,12 @@ class FakeAgentExecutor:
 
     def execute(self, request: ExecutionRequest) -> ExecutionResult:
         self.requests.append(request)
-        if self.fix_on_attempt is not None and request.attempt >= self.fix_on_attempt:
+        tier_matches = self.fix_on_tier is None or request.selection.tier is self.fix_on_tier
+        if (
+            self.fix_on_attempt is not None
+            and request.attempt >= self.fix_on_attempt
+            and tier_matches
+        ):
             self._apply_known_fix(request)
         return ExecutionResult(
             succeeded=True,

@@ -113,7 +113,12 @@ class TaskRecord(BaseModel):
     workspace_path: str | None = None
     active_execution: ExecutionKind | None = None
     execution_owner: str | None = None
+    execution_id: str | None = None
+    execution_actor_id: str | None = None
+    execution_pid: int | None = None
+    execution_hostname: str | None = None
     execution_started_at: datetime | None = None
+    execution_heartbeat_at: datetime | None = None
     pause_requested: bool = False
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))

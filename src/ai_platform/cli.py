@@ -13,9 +13,11 @@ from rich.table import Table
 
 from ai_platform.approval import ApprovalError
 from ai_platform.config import Settings
+from ai_platform.doctor import CheckStatus, inspect_environment
 from ai_platform.events import ActorType, Event, EventType
 from ai_platform.executors import AgentExecutor, ClaudeAgentExecutor
 from ai_platform.identity import HumanIdentity, LocalIdentityProvider
+from ai_platform.locks import ExecutionLockManager
 from ai_platform.models import TaskDefinition
 from ai_platform.router import ModelRouter
 from ai_platform.sessions import TaskSession, TaskSessionError, TaskSessionService, TurnOutcome
@@ -52,9 +54,7 @@ def _application_context() -> ApplicationContext:
                     metadata={"title": definition.title},
                 )
             )
-    workspaces = LocalWorkspaceProvider(
-        settings.workspace_root, settings.project_root / "demo_repo"
-    )
+    workspaces = LocalWorkspaceProvider(settings.workspace_root, settings.demo_repository)
     sessions = TaskSessionService(
         settings,
         definitions,
@@ -63,7 +63,36 @@ def _application_context() -> ApplicationContext:
         ModelRouter.from_settings(settings),
         lambda: _executor(settings),
     )
+    sessions.recover_stale_locks(
+        recovered_by=f"cli-startup@{sessions.locks.hostname}:{sessions.locks.process_id}"
+    )
     return ApplicationContext(settings, definitions, storage, workspaces, sessions)
+
+
+@app.command()
+def doctor() -> None:
+    """Inspect local prerequisites without initializing or changing task state."""
+
+    try:
+        settings = Settings.from_env()
+        checks = inspect_environment(settings)
+    except (OSError, ValueError) as error:
+        console.print(f"[red]Configuration error:[/red] {escape(str(error))}")
+        raise typer.Exit(code=1) from None
+    table = Table(title="AI Platform Environment", show_header=True, header_style="bold cyan")
+    table.add_column("CHECK")
+    table.add_column("STATUS")
+    table.add_column("DETAIL")
+    colors = {CheckStatus.OK: "green", CheckStatus.WARN: "yellow", CheckStatus.FAIL: "red"}
+    for check in checks:
+        table.add_row(
+            check.name,
+            f"[{colors[check.status]}]{check.status.value}[/{colors[check.status]}]",
+            check.detail,
+        )
+    console.print(table)
+    if any(check.status is CheckStatus.FAIL for check in checks):
+        raise typer.Exit(code=1)
 
 
 def _definition_or_exit(context: ApplicationContext, task_id: str) -> TaskDefinition:
@@ -154,7 +183,7 @@ def attach(
         session = context.sessions.get_session(task_id)
     except TaskSessionError as error:
         _exit_with_error(error)
-    _render_session(session, context.settings.project_root)
+    _render_session(session, context.settings.project_root, context.sessions.locks)
     if not follow:
         return
 
@@ -329,7 +358,11 @@ def reset(
     console.print(f"[green]{task.id} reset to READY.[/green]")
 
 
-def _render_session(session: TaskSession, project_root: Path) -> None:
+def _render_session(
+    session: TaskSession,
+    project_root: Path,
+    lock_manager: ExecutionLockManager | None = None,
+) -> None:
     record = session.record
     workspace = (
         _display_path(Path(record.workspace_path), project_root)
@@ -349,6 +382,27 @@ def _render_session(session: TaskSession, project_root: Path) -> None:
     details.add_row("Workspace", workspace)
     active_writer = record.active_execution.value.upper() if record.active_execution else "None"
     details.add_row("Active writer", active_writer)
+    if record.active_execution:
+        details.add_row("Lock actor", record.execution_actor_id or "-")
+        details.add_row("Execution ID", record.execution_id or "-")
+        details.add_row("Lock process", str(record.execution_pid or "-"))
+        details.add_row("Lock host", record.execution_hostname or "-")
+        details.add_row(
+            "Lock acquired",
+            record.execution_started_at.isoformat() if record.execution_started_at else "-",
+        )
+        details.add_row(
+            "Lock heartbeat",
+            record.execution_heartbeat_at.isoformat() if record.execution_heartbeat_at else "-",
+        )
+        if lock_manager is not None:
+            inspection = lock_manager.inspect(record)
+            age = (
+                f", {inspection.heartbeat_age_seconds:.1f}s old"
+                if inspection.heartbeat_age_seconds is not None
+                else ""
+            )
+            details.add_row("Lock health", f"{inspection.health.value.upper()}{age}")
     if record.pause_requested:
         details.add_row("Pause", "REQUESTED")
     console.print(Panel(details, title=f"{session.definition.id} - {session.definition.title}"))

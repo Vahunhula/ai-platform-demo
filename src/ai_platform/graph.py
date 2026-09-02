@@ -19,6 +19,7 @@ from ai_platform.executors.base import (
 )
 from ai_platform.models import (
     ModelSelection,
+    ModelTier,
     TaskDefinition,
     TaskDifficulty,
     TaskStatus,
@@ -46,6 +47,8 @@ class TaskGraphState(TypedDict, total=False):
     selection_reason: str
     attempt: int
     turn_attempt: int
+    tier_attempt: int
+    execution_id: str
     continuation: bool
     human_messages: list[str]
     recent_agent_messages: list[str]
@@ -68,7 +71,9 @@ def run_task_graph(
     checkpoint_db_path: Path,
     *,
     verification_timeout_seconds: int,
-    max_attempts: int,
+    max_attempts_per_tier: int | None = None,
+    max_attempts: int | None = None,
+    execution_id: str | None = None,
     actor_id: str = "local-cli-user",
     continuation: bool = False,
     human_messages: list[str] | None = None,
@@ -78,6 +83,8 @@ def run_task_graph(
     """Run one bounded initial or continuation turn for a durable TaskSession."""
 
     checkpoint_db_path.parent.mkdir(parents=True, exist_ok=True)
+    attempts_per_tier = max_attempts_per_tier or max_attempts or 2
+    current_execution_id = execution_id or str(uuid4())
     os.environ.setdefault("LANGGRAPH_STRICT_MSGPACK", "true")
     connection = sqlite3.connect(checkpoint_db_path, check_same_thread=False)
     try:
@@ -92,14 +99,17 @@ def run_task_graph(
             executor,
             checkpointer,
             verification_timeout_seconds,
-            max_attempts,
+            attempts_per_tier,
             actor_id,
             continuation,
+            current_execution_id,
         )
         initial_state: TaskGraphState = {
             "task_id": task.id,
             "attempt": storage.get_task(task.id).attempt if continuation else 0,
             "turn_attempt": 0,
+            "tier_attempt": 0,
+            "execution_id": current_execution_id,
             "continuation": continuation,
             "human_messages": human_messages or [],
             "recent_agent_messages": recent_agent_messages or [],
@@ -130,9 +140,10 @@ def _build_graph(
     executor: AgentExecutor,
     checkpointer: SqliteSaver,
     verification_timeout_seconds: int,
-    max_attempts: int,
+    max_attempts_per_tier: int,
     actor_id: str,
     continuation: bool,
+    execution_id: str,
 ):
     def load_task(_state: TaskGraphState) -> TaskGraphState:
         if continuation:
@@ -145,7 +156,13 @@ def _build_graph(
                 or not workspace_provider.exists(task.id)
             ):
                 return {"fatal_error": "Task continuation state or workspace is missing"}
-            _change_status(storage, task.id, TaskStatus.ANALYZING, "phase3-graph")
+            _change_status(
+                storage,
+                task.id,
+                TaskStatus.ANALYZING,
+                "task-graph",
+                execution_id,
+            )
             return {
                 "task_id": task.id,
                 "title": task.title,
@@ -166,10 +183,16 @@ def _build_graph(
                 event_type=EventType.TASK_STARTED,
                 actor_type=ActorType.HUMAN,
                 actor_id=actor_id,
-                metadata={},
+                metadata={"execution_id": execution_id},
             )
         )
-        _change_status(storage, task.id, TaskStatus.ANALYZING, "phase2-graph")
+        _change_status(
+            storage,
+            task.id,
+            TaskStatus.ANALYZING,
+            "task-graph",
+            execution_id,
+        )
         return {
             "task_id": task.id,
             "title": task.title,
@@ -189,7 +212,7 @@ def _build_graph(
                     event_type=EventType.WORKSPACE_CREATED,
                     actor_type=ActorType.SYSTEM,
                     actor_id="local-workspace",
-                    metadata={"path": str(workspace)},
+                    metadata={"execution_id": execution_id, "path": str(workspace)},
                 )
             )
             return {"workspace_path": str(workspace), "fatal_error": ""}
@@ -198,18 +221,61 @@ def _build_graph(
 
     def select_model(state: TaskGraphState) -> TaskGraphState:
         selection = router.select(TaskDifficulty(state["difficulty"]))
-        _record_selection(storage, task, selection)
+        _record_selection(storage, task, selection, execution_id)
         return {
             "selected_tier": selection.tier.value,
             "selected_model": selection.model,
             "selection_reason": selection.reason,
+            "tier_attempt": 0,
+        }
+
+    def escalate_model(state: TaskGraphState) -> TaskGraphState:
+        previous = ModelSelection(
+            tier=ModelTier(state["selected_tier"]),
+            model=state["selected_model"],
+            reason=state["selection_reason"],
+        )
+        failed_attempt_count = state.get("tier_attempt", 0)
+        selection = router.escalate(previous.tier, failed_attempt_count)
+        if selection is None:
+            return {"fatal_error": "Strong model tier exhausted", "tier_attempt": 0}
+        storage.update_model_selection(task.id, selection)
+        storage.append_event(
+            Event(
+                task_id=task.id,
+                event_type=EventType.MODEL_ESCALATED,
+                actor_type=ActorType.SYSTEM,
+                actor_id="model-router",
+                metadata={
+                    "execution_id": execution_id,
+                    "previous_tier": previous.tier.value,
+                    "previous_model": previous.model,
+                    "new_tier": selection.tier.value,
+                    "new_model": selection.model,
+                    "reason": selection.reason,
+                    "failed_attempt_count": failed_attempt_count,
+                },
+            )
+        )
+        return {
+            "selected_tier": selection.tier.value,
+            "selected_model": selection.model,
+            "selection_reason": selection.reason,
+            "tier_attempt": 0,
         }
 
     def analyze_implement(state: TaskGraphState) -> TaskGraphState:
         attempt = state.get("attempt", 0) + 1
         turn_attempt = state.get("turn_attempt", 0) + 1
+        tier_attempt = state.get("tier_attempt", 0) + 1
         storage.update_attempt(task.id, attempt)
-        _change_status(storage, task.id, TaskStatus.IMPLEMENTING, "phase3-graph")
+        _change_status(
+            storage,
+            task.id,
+            TaskStatus.IMPLEMENTING,
+            "task-graph",
+            execution_id,
+        )
         try:
             preflight = executor.preflight()
             storage.append_event(
@@ -221,6 +287,8 @@ def _build_graph(
                     metadata={
                         "attempt": attempt,
                         "turn_attempt": turn_attempt,
+                        "tier_attempt": tier_attempt,
+                        "execution_id": execution_id,
                         "continuation": state.get("continuation", False),
                         "tier": state["selected_tier"],
                         "model": state["selected_model"],
@@ -238,6 +306,7 @@ def _build_graph(
                         reason=state["selection_reason"],
                     ),
                     workspace_path=Path(state["workspace_path"]),
+                    execution_id=execution_id,
                     attempt=attempt,
                     previous_failure=state.get("verification_output") or None,
                     continuation=state.get("continuation", False),
@@ -254,7 +323,7 @@ def _build_graph(
                 )
             )
             for activity in result.activities:
-                _persist_activity(storage, task.id, attempt, activity)
+                _persist_activity(storage, task.id, attempt, execution_id, activity)
             event_type = EventType.AGENT_COMPLETED if result.succeeded else EventType.AGENT_FAILED
             storage.append_event(
                 Event(
@@ -264,6 +333,7 @@ def _build_graph(
                     actor_id=preflight.provider,
                     metadata={
                         "attempt": attempt,
+                        "execution_id": execution_id,
                         "summary": result.summary[:_MAX_EVENT_OUTPUT],
                         "session_id": result.session_id,
                         "error": result.error,
@@ -273,10 +343,13 @@ def _build_graph(
                     },
                 )
             )
-            _record_file_changes(storage, workspace_provider, task.id, attempt)
+            _record_file_changes(
+                storage, workspace_provider, task.id, attempt, execution_id
+            )
             return {
                 "attempt": attempt,
                 "turn_attempt": turn_attempt,
+                "tier_attempt": tier_attempt,
                 "agent_succeeded": result.succeeded,
                 "execution_cancelled": result.cancelled,
                 "agent_error": result.error or "",
@@ -290,13 +363,21 @@ def _build_graph(
                     event_type=EventType.AGENT_FAILED,
                     actor_type=ActorType.AGENT,
                     actor_id="executor",
-                    metadata={"attempt": attempt, "error": message, "fatal": error.fatal},
+                    metadata={
+                        "attempt": attempt,
+                        "execution_id": execution_id,
+                        "error": message,
+                        "fatal": error.fatal,
+                    },
                 )
             )
-            _record_file_changes(storage, workspace_provider, task.id, attempt)
+            _record_file_changes(
+                storage, workspace_provider, task.id, attempt, execution_id
+            )
             return {
                 "attempt": attempt,
                 "turn_attempt": turn_attempt,
+                "tier_attempt": tier_attempt,
                 "agent_succeeded": False,
                 "execution_cancelled": False,
                 "agent_error": message,
@@ -310,12 +391,18 @@ def _build_graph(
                     event_type=EventType.AGENT_FAILED,
                     actor_type=ActorType.AGENT,
                     actor_id="executor",
-                    metadata={"attempt": attempt, "error": message, "fatal": True},
+                    metadata={
+                        "attempt": attempt,
+                        "execution_id": execution_id,
+                        "error": message,
+                        "fatal": True,
+                    },
                 )
             )
             return {
                 "attempt": attempt,
                 "turn_attempt": turn_attempt,
+                "tier_attempt": tier_attempt,
                 "agent_succeeded": False,
                 "execution_cancelled": False,
                 "agent_error": message,
@@ -324,7 +411,13 @@ def _build_graph(
 
     def verify(state: TaskGraphState) -> TaskGraphState:
         attempt = state["attempt"]
-        _change_status(storage, task.id, TaskStatus.VERIFYING, "phase2-graph")
+        _change_status(
+            storage,
+            task.id,
+            TaskStatus.VERIFYING,
+            "task-graph",
+            execution_id,
+        )
         command = build_verification_command(task)
         storage.append_event(
             Event(
@@ -332,7 +425,11 @@ def _build_graph(
                 event_type=EventType.TEST_STARTED,
                 actor_type=ActorType.SYSTEM,
                 actor_id="pytest-verifier",
-                metadata={"attempt": attempt, "command": command},
+                metadata={
+                    "attempt": attempt,
+                    "execution_id": execution_id,
+                    "command": command,
+                },
             )
         )
         try:
@@ -347,6 +444,7 @@ def _build_graph(
                     actor_id="pytest-verifier",
                     metadata={
                         "attempt": attempt,
+                        "execution_id": execution_id,
                         "command": result.command,
                         "started_at": result.started_at.isoformat(),
                         "finished_at": result.finished_at.isoformat(),
@@ -372,29 +470,56 @@ def _build_graph(
                     event_type=EventType.TEST_FAILED,
                     actor_type=ActorType.SYSTEM,
                     actor_id="pytest-verifier",
-                    metadata={"attempt": attempt, "command": command, "error": message},
+                    metadata={
+                        "attempt": attempt,
+                        "execution_id": execution_id,
+                        "command": command,
+                        "error": message,
+                    },
                 )
             )
             return {"verification_passed": False, "verification_output": message}
 
     def waiting_for_human(_state: TaskGraphState) -> TaskGraphState:
-        _change_status(storage, task.id, TaskStatus.WAITING_FOR_HUMAN, "phase3-graph")
+        _change_status(
+            storage,
+            task.id,
+            TaskStatus.WAITING_FOR_HUMAN,
+            "task-graph",
+            execution_id,
+        )
         return {"status": TaskStatus.WAITING_FOR_HUMAN.value}
 
     def paused(_state: TaskGraphState) -> TaskGraphState:
-        _change_status(storage, task.id, TaskStatus.PAUSED_BY_HUMAN, "phase3-graph")
+        _change_status(
+            storage,
+            task.id,
+            TaskStatus.PAUSED_BY_HUMAN,
+            "task-graph",
+            execution_id,
+        )
         return {"status": TaskStatus.PAUSED_BY_HUMAN.value}
 
     def failed(state: TaskGraphState) -> TaskGraphState:
-        _change_status(storage, task.id, TaskStatus.FAILED, "phase3-graph")
+        _change_status(
+            storage,
+            task.id,
+            TaskStatus.FAILED,
+            "task-graph",
+            execution_id,
+        )
         error = state.get("fatal_error") or state.get("verification_output") or "Task failed"
         storage.append_event(
             Event(
                 task_id=task.id,
                 event_type=EventType.TASK_FAILED,
                 actor_type=ActorType.SYSTEM,
-                actor_id="phase3-graph",
-                metadata={"attempt": state.get("attempt", 0), "error": error[-_MAX_EVENT_OUTPUT:]},
+                actor_id="task-graph",
+                metadata={
+                    "attempt": state.get("attempt", 0),
+                    "execution_id": execution_id,
+                    "error": error[-_MAX_EVENT_OUTPUT:],
+                },
             )
         )
         return {"status": TaskStatus.FAILED.value}
@@ -416,19 +541,24 @@ def _build_graph(
 
     def after_verification(
         state: TaskGraphState,
-    ) -> Literal["waiting_for_human", "analyze_implement", "paused", "failed"]:
+    ) -> Literal[
+        "waiting_for_human", "analyze_implement", "escalate_model", "paused", "failed"
+    ]:
         if storage.is_pause_requested(task.id):
             return "paused"
         if state.get("verification_passed"):
             return "waiting_for_human"
-        if state.get("turn_attempt", 0) < max_attempts:
+        if state.get("tier_attempt", 0) < max_attempts_per_tier:
             return "analyze_implement"
+        if router.next_tier(ModelTier(state["selected_tier"])) is not None:
+            return "escalate_model"
         return "failed"
 
     builder = StateGraph(TaskGraphState)
     builder.add_node("load_task", load_task)
     builder.add_node("prepare_workspace", prepare_workspace)
     builder.add_node("select_model", select_model)
+    builder.add_node("escalate_model", escalate_model)
     builder.add_node("analyze_implement", analyze_implement)
     builder.add_node("verify", verify)
     builder.add_node("waiting_for_human", waiting_for_human)
@@ -440,6 +570,7 @@ def _build_graph(
     builder.add_edge("select_model", "analyze_implement")
     builder.add_conditional_edges("analyze_implement", after_implementation)
     builder.add_conditional_edges("verify", after_verification)
+    builder.add_edge("escalate_model", "analyze_implement")
     builder.add_edge("waiting_for_human", END)
     builder.add_edge("paused", END)
     builder.add_edge("failed", END)
@@ -447,7 +578,10 @@ def _build_graph(
 
 
 def _record_selection(
-    storage: SQLiteStorage, task: TaskDefinition, selection: ModelSelection
+    storage: SQLiteStorage,
+    task: TaskDefinition,
+    selection: ModelSelection,
+    execution_id: str,
 ) -> None:
     storage.update_model_selection(task.id, selection)
     storage.append_event(
@@ -457,6 +591,7 @@ def _record_selection(
             actor_type=ActorType.SYSTEM,
             actor_id="model-router",
             metadata={
+                "execution_id": execution_id,
                 "difficulty": task.difficulty.value,
                 **selection.model_dump(mode="json"),
             },
@@ -464,7 +599,13 @@ def _record_selection(
     )
 
 
-def _change_status(storage: SQLiteStorage, task_id: str, status: TaskStatus, actor_id: str) -> None:
+def _change_status(
+    storage: SQLiteStorage,
+    task_id: str,
+    status: TaskStatus,
+    actor_id: str,
+    execution_id: str,
+) -> None:
     current = storage.get_task(task_id)
     previous = current.status if current else None
     storage.update_task_status(task_id, status)
@@ -475,6 +616,7 @@ def _change_status(storage: SQLiteStorage, task_id: str, status: TaskStatus, act
             actor_type=ActorType.SYSTEM,
             actor_id=actor_id,
             metadata={
+                "execution_id": execution_id,
                 "from": previous.value if previous else None,
                 "to": status.value,
             },
@@ -483,7 +625,11 @@ def _change_status(storage: SQLiteStorage, task_id: str, status: TaskStatus, act
 
 
 def _persist_activity(
-    storage: SQLiteStorage, task_id: str, attempt: int, activity: AgentActivity
+    storage: SQLiteStorage,
+    task_id: str,
+    attempt: int,
+    execution_id: str,
+    activity: AgentActivity,
 ) -> None:
     event_type = (
         EventType.AGENT_MESSAGE
@@ -498,6 +644,7 @@ def _persist_activity(
             actor_id="claude",
             metadata={
                 "attempt": attempt,
+                "execution_id": execution_id,
                 "activity": activity.activity_type.value,
                 **activity.metadata,
             },
@@ -510,6 +657,7 @@ def _record_file_changes(
     workspace_provider: WorkspaceProvider,
     task_id: str,
     attempt: int,
+    execution_id: str,
 ) -> None:
     for change in workspace_provider.get_changed_files(task_id):
         storage.append_event(
@@ -520,6 +668,7 @@ def _record_file_changes(
                 actor_id="git-inspector",
                 metadata={
                     "attempt": attempt,
+                    "execution_id": execution_id,
                     "path": change.path,
                     "change_type": change.change_type,
                 },

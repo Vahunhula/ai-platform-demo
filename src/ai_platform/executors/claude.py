@@ -3,13 +3,10 @@
 import asyncio
 import importlib.metadata
 import importlib.util
-import json
-import os
-import shutil
-import subprocess
 from pathlib import Path
 from typing import Any
 
+from ai_platform.claude_auth import ClaudeAuthState, inspect_claude_auth
 from ai_platform.config import Settings
 from ai_platform.executors.base import (
     AgentActivity,
@@ -189,6 +186,7 @@ Current Git diff (may be empty or truncated):
                 "the current files; do not restore an older agent version over them.\n"
             )
         return f"""Task: {request.task.id}
+Execution ID: {request.execution_id}
 Title: {request.task.title}
 
 Description:
@@ -231,43 +229,24 @@ Instructions:
         return False
 
     def _authentication_method(self) -> str:
-        cloud_methods = (
-            ("CLAUDE_CODE_USE_BEDROCK", "Amazon Bedrock environment"),
-            ("CLAUDE_CODE_USE_VERTEX", "Google Vertex environment"),
-            ("CLAUDE_CODE_USE_FOUNDRY", "Microsoft Foundry environment"),
-        )
-        for variable, label in cloud_methods:
-            if os.getenv(variable):
-                return label
-        if os.getenv("ANTHROPIC_AUTH_TOKEN"):
-            return "ANTHROPIC_AUTH_TOKEN environment"
-        if self.settings.anthropic_api_key:
-            return "ANTHROPIC_API_KEY environment/.env"
-        if os.getenv("CLAUDE_CODE_OAUTH_TOKEN"):
-            return "CLAUDE_CODE_OAUTH_TOKEN environment"
-
-        claude_path = shutil.which("claude")
-        if claude_path:
-            try:
-                completed = subprocess.run(
-                    [claude_path, "auth", "status", "--json"],
-                    check=False,
-                    capture_output=True,
-                    text=True,
-                    timeout=10,
-                    shell=False,
-                )
-                status = json.loads(completed.stdout) if completed.stdout else {}
-                if completed.returncode == 0 and status.get("loggedIn"):
-                    method = status.get("authMethod", "Claude Code login")
-                    plan = status.get("subscriptionType")
-                    return f"Claude Code {method}" + (f" ({plan})" if plan else "")
-            except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
-                pass
-
+        status = inspect_claude_auth(self.settings)
+        if status.state in {ClaudeAuthState.AUTHENTICATED, ClaudeAuthState.CONFIGURED}:
+            suffix = (
+                " (configured, not validated)"
+                if status.state is ClaudeAuthState.CONFIGURED
+                else ""
+            )
+            return status.method + suffix
+        if status.state is ClaudeAuthState.MISSING:
+            raise AgentAuthenticationError(
+                "Claude authentication is unavailable or expired. "
+                f"{status.detail}. Run the supported command: claude auth login. "
+                "Alternatively set ANTHROPIC_API_KEY for Console API billing."
+            )
         raise AgentAuthenticationError(
-            "Claude authentication is missing. Run 'claude auth login' for a supported "
-            "Claude Code account, or set ANTHROPIC_API_KEY for Console API billing."
+            "Claude authentication status is unknown. "
+            f"{status.detail}. Verify with 'claude auth status --json' or run "
+            "'claude auth login', then retry."
         )
 
     def _normalize_blocks(
@@ -369,5 +348,12 @@ Instructions:
             "api key",
             "unauthorized",
         )
-        model_terms = ("invalid model", "model not found", "model_not_found")
+        model_terms = (
+            "invalid model",
+            "model not found",
+            "model_not_found",
+            "model unavailable",
+            "model is not available",
+            "unknown model",
+        )
         return any(term in normalized for term in (*authentication_terms, *model_terms))

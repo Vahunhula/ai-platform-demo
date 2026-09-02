@@ -51,6 +51,7 @@ def _settings(tmp_path: Path) -> Settings:
     return Settings(
         project_root=root,
         tasks_path=root / "tasks.json",
+        demo_repository=root / "demo_repo",
         data_dir=tmp_path / "data",
         workspace_root=tmp_path / "workspaces",
         db_path=tmp_path / "data" / "platform.db",
@@ -63,7 +64,9 @@ def _settings(tmp_path: Path) -> Settings:
         agent_timeout_seconds=20,
         agent_max_turns=3,
         verification_timeout_seconds=20,
-        max_attempts=2,
+        max_attempts_per_tier=2,
+        lock_heartbeat_seconds=1,
+        lock_stale_seconds=10,
     )
 
 
@@ -77,9 +80,7 @@ def _service(
     storage.initialize()
     for task in definitions:
         storage.create_task(task)
-    workspaces = LocalWorkspaceProvider(
-        settings.workspace_root, settings.project_root / "demo_repo"
-    )
+    workspaces = LocalWorkspaceProvider(settings.workspace_root, settings.demo_repository)
     router = ModelRouter(
         {
             ModelTier.CHEAP: "haiku-test",
@@ -320,6 +321,7 @@ def test_parallel_cli_processes_write_same_sqlite_without_corruption(tmp_path: P
             check=False,
             capture_output=True,
             text=True,
+            encoding="utf-8",
             timeout=20,
             shell=False,
         )
@@ -327,7 +329,9 @@ def test_parallel_cli_processes_write_same_sqlite_without_corruption(tmp_path: P
     with ThreadPoolExecutor(max_workers=4) as pool:
         results = list(pool.map(write_from_process, range(4)))
 
-    assert [result.returncode for result in results] == [0, 0, 0, 0]
+    assert [result.returncode for result in results] == [0, 0, 0, 0], [
+        (result.returncode, result.stdout, result.stderr) for result in results
+    ]
     storage = SQLiteStorage(settings.db_path)
     storage.initialize()
     messages = [

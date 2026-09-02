@@ -62,7 +62,7 @@ def _run(
         executor,
         tmp_path / "data" / "checkpoints.db",
         verification_timeout_seconds=20,
-        max_attempts=2,
+        max_attempts_per_tier=2,
         actor_id="test",
     )
     return state, storage, workspaces
@@ -112,14 +112,93 @@ def test_failed_verification_retries_current_workspace_then_passes(tmp_path: Pat
     assert EventType.TEST_PASSED in event_types
 
 
-def test_two_failed_attempts_mark_task_failed(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("task_id", "fix_tier", "expected_tiers"),
+    [
+        (
+            "DEMO-1",
+            ModelTier.DEFAULT,
+            [ModelTier.CHEAP, ModelTier.CHEAP, ModelTier.DEFAULT],
+        ),
+        (
+            "DEMO-2",
+            ModelTier.STRONG,
+            [ModelTier.DEFAULT, ModelTier.DEFAULT, ModelTier.STRONG],
+        ),
+    ],
+)
+def test_repeated_failures_escalate_then_pass(
+    tmp_path: Path,
+    task_id: str,
+    fix_tier: ModelTier,
+    expected_tiers: list[ModelTier],
+) -> None:
+    executor = FakeAgentExecutor(fix_on_tier=fix_tier)
+
+    state, storage, _workspaces = _run(tmp_path, _task(task_id), executor)
+
+    assert state["status"] == TaskStatus.WAITING_FOR_HUMAN.value
+    assert [request.selection.tier for request in executor.requests] == expected_tiers
+    record = storage.get_task(task_id)
+    assert record is not None
+    assert record.selected_tier is fix_tier
+    events = storage.get_events(task_id)
+    selected = [event for event in events if event.event_type is EventType.MODEL_SELECTED]
+    escalated = [event for event in events if event.event_type is EventType.MODEL_ESCALATED]
+    assert len(selected) == 1
+    assert selected[0].metadata["tier"] == expected_tiers[0].value
+    assert len(escalated) == 1
+    assert escalated[0].metadata["previous_tier"] == expected_tiers[0].value
+    assert escalated[0].metadata["new_tier"] == fix_tier.value
+    assert escalated[0].metadata["failed_attempt_count"] == 2
+    assert [event.sequence_id for event in events] == sorted(
+        event.sequence_id for event in events
+    )
+
+
+def test_continuation_keeps_current_escalated_tier_and_new_execution_id(
+    tmp_path: Path,
+) -> None:
+    task = _task("DEMO-1")
+    initial = FakeAgentExecutor(fix_on_tier=ModelTier.DEFAULT)
+    _state, storage, workspaces = _run(tmp_path, task, initial)
+    initial_execution_ids = {request.execution_id for request in initial.requests}
+    continuation = FakeAgentExecutor()
+
+    state = run_task_graph(
+        task,
+        _router(),
+        storage,
+        workspaces,
+        continuation,
+        tmp_path / "data" / "checkpoints.db",
+        verification_timeout_seconds=20,
+        max_attempts_per_tier=2,
+        execution_id="continuation-execution",
+        continuation=True,
+    )
+
+    assert state["status"] == TaskStatus.WAITING_FOR_HUMAN.value
+    assert initial_execution_ids and len(initial_execution_ids) == 1
+    assert continuation.requests[0].selection.tier is ModelTier.DEFAULT
+    assert continuation.requests[0].execution_id == "continuation-execution"
+    assert continuation.requests[0].selection.tier is not ModelTier.CHEAP
+    model_events = [
+        event.event_type
+        for event in storage.get_events(task.id)
+        if event.event_type in {EventType.MODEL_SELECTED, EventType.MODEL_ESCALATED}
+    ]
+    assert model_events == [EventType.MODEL_SELECTED, EventType.MODEL_ESCALATED]
+
+
+def test_strong_exhaustion_after_two_attempts_marks_task_failed(tmp_path: Path) -> None:
     executor = FakeAgentExecutor(fix_on_attempt=None)
 
-    state, storage, _workspaces = _run(tmp_path, _task("DEMO-1"), executor)
+    state, storage, _workspaces = _run(tmp_path, _task("DEMO-3"), executor)
 
     assert state["status"] == TaskStatus.FAILED.value
     assert len(executor.requests) == 2
-    record = storage.get_task("DEMO-1")
+    record = storage.get_task("DEMO-3")
     assert record is not None
     assert record.status is TaskStatus.FAILED
     assert record.verification_status is VerificationStatus.FAILED

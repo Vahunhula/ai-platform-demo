@@ -41,6 +41,7 @@ class ExecutionRequest(BaseModel):
     task: TaskDefinition
     selection: ModelSelection
     workspace_path: Path
+    execution_id: str = Field(min_length=1)
     attempt: int = Field(ge=1)
     previous_failure: str | None = None
     continuation: bool = False

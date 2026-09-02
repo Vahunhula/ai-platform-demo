@@ -12,9 +12,10 @@ from uuid import uuid4
 from ai_platform.approval import approve_task
 from ai_platform.config import Settings
 from ai_platform.events import ActorType, Event, EventType
-from ai_platform.executors import AgentExecutor
+from ai_platform.executors import AgentExecutor, AgentExecutorError
 from ai_platform.graph import TaskGraphState, run_task_graph
 from ai_platform.identity import HumanIdentity
+from ai_platform.locks import ExecutionLockManager, LockAcquisition
 from ai_platform.models import ExecutionKind, TaskDefinition, TaskRecord, TaskStatus
 from ai_platform.router import ModelRouter
 from ai_platform.storage import SQLiteStorage
@@ -81,6 +82,7 @@ class TaskSessionService:
         workspaces: LocalWorkspaceProvider,
         router: ModelRouter,
         executor_factory: Callable[[], AgentExecutor],
+        lock_manager: ExecutionLockManager | None = None,
     ) -> None:
         self.settings = settings
         self.definitions = definitions
@@ -88,6 +90,11 @@ class TaskSessionService:
         self.workspaces = workspaces
         self.router = router
         self.executor_factory = executor_factory
+        self.locks = lock_manager or ExecutionLockManager(
+            storage,
+            heartbeat_seconds=settings.lock_heartbeat_seconds,
+            stale_seconds=settings.lock_stale_seconds,
+        )
 
     def get_session(self, task_id: str) -> TaskSession:
         """Load the one shared session represented by durable state plus workspace."""
@@ -125,15 +132,25 @@ class TaskSessionService:
             raise TaskSessionError(
                 f"{task.id} is {record.status.value.upper()}; reset it before a new start."
             )
-        owner = self._execution_owner("agent")
-        if not self.storage.try_acquire_execution(
+        executor = self._preflight_executor()
+        execution_id = str(uuid4())
+        lock = self.locks.acquire(
             task.id,
             ExecutionKind.AGENT,
-            owner,
+            "claude",
+            execution_id,
             allowed_statuses={TaskStatus.READY},
-        ):
-            raise TaskSessionError(f"{task.id} already has an active workspace writer")
-        state = self._run_agent_turn(task, human, owner, continuation=False)
+        )
+        if not lock.acquired:
+            raise self._lock_error(task.id, lock)
+        state = self._run_agent_turn(
+            task,
+            human,
+            lock.owner_token,
+            execution_id,
+            executor,
+            continuation=False,
+        )
         return TurnOutcome(agent_started=True, state=state)
 
     def message(self, task_id: str, message: str, human: HumanIdentity) -> TurnOutcome:
@@ -185,6 +202,7 @@ class TaskSessionService:
             human,
             {
                 "deferred": result.deferred,
+                "execution_id": record.execution_id,
                 "active_execution": result.active_execution.value
                 if result.active_execution
                 else None,
@@ -214,19 +232,21 @@ class TaskSessionService:
             raise TaskSessionError(
                 f"{task.id} must be PAUSED_BY_HUMAN before opening a shell"
             )
-        owner = self._execution_owner("shell")
-        if not self.storage.try_acquire_execution(
+        execution_id = str(uuid4())
+        lock = self.locks.acquire(
             task.id,
             ExecutionKind.HUMAN_SHELL,
-            owner,
+            human.actor_id,
+            execution_id,
             allowed_statuses={TaskStatus.PAUSED_BY_HUMAN},
-        ):
+        )
+        if not lock.acquired:
             latest = self._record(task.id)
             if latest.agent_running:
                 raise TaskSessionError(
                     f"{task.id} is currently being modified by Claude. Pause it before takeover."
                 )
-            raise TaskSessionError(f"{task.id} already has an active human shell")
+            raise self._lock_error(task.id, lock)
 
         workspace = self.workspaces.get_path(task.id)
         before = self.workspaces.snapshot(task.id)
@@ -236,6 +256,7 @@ class TaskSessionService:
             human,
             {
                 "workspace": str(workspace),
+                "execution_id": execution_id,
                 "changed_files_before": sorted(before.files),
                 "git_state_before": before.fingerprint,
             },
@@ -244,7 +265,8 @@ class TaskSessionService:
         changes: list[FileChange] = []
         try:
             try:
-                exit_code = (runner or self._run_interactive_shell)(workspace)
+                with self.locks.heartbeat(task.id, lock.owner_token):
+                    exit_code = (runner or self._run_interactive_shell)(workspace)
             finally:
                 after = self.workspaces.snapshot(task.id)
                 changes = self.workspaces.changes_between(before, after)
@@ -253,16 +275,23 @@ class TaskSessionService:
                         task.id,
                         EventType.HUMAN_WORKSPACE_CHANGED,
                         human,
-                        {"files": [change.model_dump() for change in changes]},
+                        {
+                            "execution_id": execution_id,
+                            "files": [change.model_dump() for change in changes],
+                        },
                     )
                 self._append_human_event(
                     task.id,
                     EventType.HUMAN_SHELL_CLOSED,
                     human,
-                    {"exit_code": exit_code, "git_state_after": after.fingerprint},
+                    {
+                        "execution_id": execution_id,
+                        "exit_code": exit_code,
+                        "git_state_after": after.fingerprint,
+                    },
                 )
         finally:
-            self.storage.release_execution(task.id, owner)
+            self.storage.release_execution(task.id, lock.owner_token)
         return changes
 
     def resume(
@@ -285,16 +314,26 @@ class TaskSessionService:
                 human,
                 {"message": content},
             )
-        owner = self._execution_owner("agent")
-        if not self.storage.try_acquire_execution(
+        executor = self._preflight_executor()
+        execution_id = str(uuid4())
+        lock = self.locks.acquire(
             task.id,
             ExecutionKind.AGENT,
-            owner,
+            "claude",
+            execution_id,
             allowed_statuses={TaskStatus.PAUSED_BY_HUMAN},
-        ):
-            raise TaskSessionError(f"{task.id} still has an active workspace writer")
+        )
+        if not lock.acquired:
+            raise self._lock_error(task.id, lock)
         self._append_human_event(task.id, EventType.HUMAN_RESUMED, human)
-        state = self._run_agent_turn(task, human, owner, continuation=True)
+        state = self._run_agent_turn(
+            task,
+            human,
+            lock.owner_token,
+            execution_id,
+            executor,
+            continuation=True,
+        )
         return TurnOutcome(agent_started=True, state=state)
 
     def reject(self, task_id: str, message: str, human: HumanIdentity) -> TurnOutcome:
@@ -381,13 +420,16 @@ class TaskSessionService:
         human: HumanIdentity,
         allowed_statuses: set[TaskStatus],
     ) -> TurnOutcome:
-        owner = self._execution_owner("agent")
-        if not self.storage.try_acquire_execution(
+        executor = self._preflight_executor()
+        execution_id = str(uuid4())
+        lock = self.locks.acquire(
             task.id,
             ExecutionKind.AGENT,
-            owner,
+            "claude",
+            execution_id,
             allowed_statuses=allowed_statuses,
-        ):
+        )
+        if not lock.acquired:
             latest = self._record(task.id)
             return TurnOutcome(
                 agent_started=False,
@@ -399,7 +441,14 @@ class TaskSessionService:
                     else f"Message recorded; {task.id} is now {latest.status.value.upper()}."
                 ),
             )
-        state = self._run_agent_turn(task, human, owner, continuation=True)
+        state = self._run_agent_turn(
+            task,
+            human,
+            lock.owner_token,
+            execution_id,
+            executor,
+            continuation=True,
+        )
         return TurnOutcome(agent_started=True, state=state)
 
     def _run_agent_turn(
@@ -407,27 +456,37 @@ class TaskSessionService:
         task: TaskDefinition,
         human: HumanIdentity,
         owner: str,
+        execution_id: str,
+        executor: AgentExecutor,
         *,
         continuation: bool,
     ) -> TaskGraphState:
         human_messages, agent_messages = self._current_conversation_context(task.id)
         human_workspace_changed = self._human_changed_workspace_since_last_agent(task.id)
         try:
-            return run_task_graph(
-                task,
-                self.router,
-                self.storage,
-                self.workspaces,
-                self.executor_factory(),
-                self.settings.checkpoint_db_path,
-                verification_timeout_seconds=self.settings.verification_timeout_seconds,
-                max_attempts=self.settings.max_attempts,
-                actor_id=human.actor_id,
-                continuation=continuation,
-                human_messages=human_messages,
-                recent_agent_messages=agent_messages,
-                human_workspace_changed=human_workspace_changed,
-            )
+            with self.locks.heartbeat(task.id, owner):
+                return run_task_graph(
+                    task,
+                    self.router,
+                    self.storage,
+                    self.workspaces,
+                    executor,
+                    self.settings.checkpoint_db_path,
+                    verification_timeout_seconds=self.settings.verification_timeout_seconds,
+                    max_attempts_per_tier=self.settings.max_attempts_per_tier,
+                    execution_id=execution_id,
+                    actor_id=human.actor_id,
+                    continuation=continuation,
+                    human_messages=human_messages,
+                    recent_agent_messages=agent_messages,
+                    human_workspace_changed=human_workspace_changed,
+                )
+        except KeyboardInterrupt:
+            previous = self._record(task.id).status
+            self.storage.update_task_status(task.id, TaskStatus.PAUSED_BY_HUMAN)
+            if previous is not TaskStatus.PAUSED_BY_HUMAN:
+                self._append_status_change(task.id, previous, TaskStatus.PAUSED_BY_HUMAN)
+            raise
         except Exception as error:
             if not self.storage.is_pause_requested(task.id):
                 previous = self._record(task.id).status
@@ -440,7 +499,10 @@ class TaskSessionService:
                         event_type=EventType.TASK_FAILED,
                         actor_type=ActorType.SYSTEM,
                         actor_id="task-session-service",
-                        metadata={"error": (str(error) or type(error).__name__)[:2000]},
+                        metadata={
+                            "execution_id": execution_id,
+                            "error": (str(error) or type(error).__name__)[:2000],
+                        },
                     )
                 )
             raise
@@ -498,6 +560,11 @@ class TaskSessionService:
             raise TaskSessionError(f"No runtime state exists for {task_id}")
         return record
 
+    def recover_stale_locks(self, *, recovered_by: str) -> list[str]:
+        """Recover demonstrably stale locks and pause their unknown workspace state."""
+
+        return self.locks.recover_all_stale_locks(recovered_by=recovered_by)
+
     def _append_human_event(
         self,
         task_id: str,
@@ -532,9 +599,38 @@ class TaskSessionService:
             )
         )
 
-    @staticmethod
-    def _execution_owner(kind: str) -> str:
-        return f"{kind}:{os.getpid()}:{uuid4()}"
+    def _preflight_executor(self) -> AgentExecutor:
+        executor = self.executor_factory()
+        try:
+            executor.preflight()
+        except AgentExecutorError as error:
+            raise TaskSessionError(str(error)) from error
+        except Exception as error:
+            message = str(error) or type(error).__name__
+            raise TaskSessionError(f"Agent executor preflight failed: {message[:1000]}") from error
+        return executor
+
+    def _lock_error(self, task_id: str, acquisition: LockAcquisition) -> TaskSessionError:
+        if acquisition.recovered_stale_lock:
+            return TaskSessionError(
+                f"Recovered a stale lock for {task_id} and paused the task. "
+                "Inspect its diff and trace, then resume explicitly."
+            )
+        record = acquisition.current
+        if record is None or record.active_execution is None:
+            return TaskSessionError(f"{task_id} could not acquire its workspace lock")
+        inspection = self.locks.inspect(record)
+        age = (
+            f"{inspection.heartbeat_age_seconds:.1f}s ago"
+            if inspection.heartbeat_age_seconds is not None
+            else "unknown"
+        )
+        actor = record.execution_actor_id or record.execution_owner or "unknown"
+        return TaskSessionError(
+            f"{task_id} has a {inspection.health.value} {record.active_execution.value} lock "
+            f"owned by {actor} on {record.execution_hostname or 'unknown host'} "
+            f"(pid {record.execution_pid or 'unknown'}, heartbeat {age})."
+        )
 
     @staticmethod
     def _validate_message(message: str) -> str:

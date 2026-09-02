@@ -30,6 +30,7 @@ class Settings:
 
     project_root: Path
     tasks_path: Path
+    demo_repository: Path
     data_dir: Path
     workspace_root: Path
     db_path: Path
@@ -42,7 +43,9 @@ class Settings:
     agent_timeout_seconds: int
     agent_max_turns: int
     verification_timeout_seconds: int
-    max_attempts: int
+    max_attempts_per_tier: int
+    lock_heartbeat_seconds: int
+    lock_stale_seconds: int
 
     @classmethod
     def from_env(cls, project_root: Path | None = None) -> "Settings":
@@ -50,6 +53,10 @@ class Settings:
 
         root = (project_root or Path(__file__).resolve().parents[2]).resolve()
         values: dict[str, Any] = {**dotenv_values(root / ".env"), **os.environ}
+        if "AI_PLATFORM_MAX_ATTEMPTS_PER_TIER" not in values:
+            legacy_attempts = values.get("AI_PLATFORM_MAX_ATTEMPTS")
+            if legacy_attempts not in (None, ""):
+                values["AI_PLATFORM_MAX_ATTEMPTS_PER_TIER"] = legacy_attempts
 
         def setting(name: str, default: str) -> str:
             value = values.get(name, default)
@@ -63,9 +70,20 @@ class Settings:
             root,
         )
 
+        heartbeat_seconds = _positive_int(values, "AI_PLATFORM_LOCK_HEARTBEAT_SECONDS", 5)
+        stale_seconds = _positive_int(values, "AI_PLATFORM_LOCK_STALE_SECONDS", 60)
+        if stale_seconds <= heartbeat_seconds:
+            raise ValueError(
+                "AI_PLATFORM_LOCK_STALE_SECONDS must be greater than "
+                "AI_PLATFORM_LOCK_HEARTBEAT_SECONDS"
+            )
+
         return cls(
             project_root=root,
-            tasks_path=root / "tasks.json",
+            tasks_path=_resolve_path(setting("AI_PLATFORM_TASK_FILE", "tasks.json"), root),
+            demo_repository=_resolve_path(
+                setting("AI_PLATFORM_DEMO_REPO", "demo_repo"), root
+            ),
             data_dir=data_dir,
             workspace_root=workspace_root,
             db_path=db_path,
@@ -80,5 +98,9 @@ class Settings:
             verification_timeout_seconds=_positive_int(
                 values, "AI_PLATFORM_VERIFICATION_TIMEOUT_SECONDS", 60
             ),
-            max_attempts=_positive_int(values, "AI_PLATFORM_MAX_ATTEMPTS", 2),
+            max_attempts_per_tier=_positive_int(
+                values, "AI_PLATFORM_MAX_ATTEMPTS_PER_TIER", 2
+            ),
+            lock_heartbeat_seconds=heartbeat_seconds,
+            lock_stale_seconds=stale_seconds,
         )

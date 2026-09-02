@@ -1,3 +1,3 @@
 """Shared, durable AI development TaskSession demo."""
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"

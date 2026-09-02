@@ -1,8 +1,9 @@
 # AI Platform Demo
 
 AI Platform Demo is a proof of concept for a shared, persistent, task-owned AI
-software-development workflow. Phase 3 adds human collaboration around the real
-Claude Agent SDK workflow built in Phase 2.
+software-development workflow. Phase 4 adds evidence-based model escalation,
+execution leases, safe crash recovery, and Linux deployment preparation around
+the shared collaboration workflow built in Phases 1-3.
 
 The central rule is:
 
@@ -11,9 +12,31 @@ one task = one shared TaskSession = one workspace + one append-only history
 ```
 
 No Docker, web UI, Jira, SSH provisioning, PostgreSQL, Odoo, pull requests,
-SSO, or multi-provider execution is included in this phase.
+SSO, or multi-provider execution is included in this phase. Phase 4 prepares
+for a server deployment; it does not claim that a VPS has been tested or deployed.
 
-## Phase 3 - Shared TaskSession collaboration
+## Phase 4 - Routing and reliability
+
+Task difficulty chooses only the initial tier. Deterministic verification is
+evidence: two failures at a tier (configurable) move the task one way from
+`cheap` to `default` to `strong`. Strong-tier exhaustion ends in `FAILED` for
+human intervention. There are no unbounded loops or automatic downgrades.
+
+```text
+LOW -> CHEAP -> failure -> CHEAP RETRY -> failure -> DEFAULT -> PASS
+```
+
+This keeps the cheapest model likely to succeed while preserving a bounded path
+to stronger models. `MODEL_SELECTED` remains in append-only history;
+`MODEL_ESCALATED` records the old/new tier and model, reason, failure count, and
+execution ID. Follow-up human turns use the task's current tier, so an escalated
+task does not silently return to its difficulty's initial tier.
+
+Each agent turn has a UUID `execution_id`, shared by its attempts, verification,
+file, and routing events and by its workspace lease. Global `attempt` remains a
+monotonic task counter, while the retry threshold applies per tier within a turn.
+
+## Shared TaskSession collaboration
 
 ```text
                        DEMO-1
@@ -51,7 +74,10 @@ flowchart TD
     E --> F[Task-owned Git workspace]
     F --> G[Platform-owned pytest verification]
     G -->|pass| H[WAITING_FOR_HUMAN]
-    G -->|bounded retry exhausted| I[FAILED]
+    G -->|fail below tier limit| C
+    G -->|tier exhausted| N[Escalate one tier]
+    N --> C
+    N -->|strong exhausted| I[FAILED]
     H -->|message or reject| C
     H -->|pause| J[PAUSED_BY_HUMAN]
     J -->|exclusive human shell| F
@@ -110,12 +136,26 @@ They sit in the same history as model selections, agent messages/tool activity,
 file changes, verification, retries, status changes, failures, and completion.
 New instructions never rewrite old ones.
 
-## One active workspace writer
+## One active workspace writer and crash recovery
 
 The `tasks` table contains one durable, atomic workspace lock with a kind,
-owner, and start time. The two lock kinds are `agent` and `human_shell`.
+opaque owner token, actor, process ID, hostname, acquired time, heartbeat,
+and execution ID. The two lock kinds are `agent` and `human_shell`.
 SQLite `BEGIN IMMEDIATE` plus a conditional update ensures that only one process
 can acquire the lock for a task.
+
+Agent turns and human shells refresh their heartbeat every 5 seconds by default.
+After 60 seconds without a heartbeat, a lock is only recoverable when its owner
+is on this host and the recorded process is demonstrably gone (or legacy state
+has no process). A healthy local process is not displaced, and an expired lock
+from another host is reported as unverifiable rather than stolen.
+
+Normal completion, failure, timeout, pause, verification errors, and Ctrl+C use
+reliable cleanup paths. Every ordinary CLI startup also inspects locks. A
+demonstrably stale crashed execution produces `STALE_LOCK_RECOVERED`, clears the
+lease, and moves unknown workspace state to `PAUSED_BY_HUMAN`. The human can then
+run `diff`, inspect `trace`, and explicitly `resume`. `attach` displays current
+lock actor, execution ID, host, PID, timestamps, heartbeat age, and health.
 
 If a second human sends a message while Claude is running, `HUMAN_MESSAGE` is
 stored immediately, but another agent is not launched. The CLI explains that
@@ -154,6 +194,7 @@ in that same directory, and independently verifies the result.
 
 ```powershell
 ai-platform tasks
+ai-platform doctor
 ai-platform show DEMO-1
 ai-platform start DEMO-1
 ai-platform attach DEMO-1
@@ -179,14 +220,36 @@ Approval is accepted only from `WAITING_FOR_HUMAN` after passing platform
 verification and when there is no active writer. It records `HUMAN_APPROVED`
 with the real actor, followed by system status/completion events.
 
-## Phase 2 foundations retained
+## Claude preflight and doctor
+
+Before any real workspace is created or agent lock is acquired, the Claude
+executor checks that the Agent SDK is installed and inspects the supported
+`claude auth status --json` result. A logged-out or expired local session returns
+a short platform error with the installed CLI's supported recovery command:
+
+```text
+claude auth login
+```
+
+Environment credentials are reported as configured but not validated. Invalid
+credentials and unavailable model aliases are normalized if the SDK reports
+them during execution; preflight and `doctor` do not make a paid model request
+just to validate them.
+
+`ai-platform doctor` is read-only with respect to task state. It checks Python,
+Git, SQLite, the Claude Agent SDK and CLI, authentication status, configured
+model validation limits, task/demo inputs, path writability, an existing
+platform database, the Git worktree, and the operating system. It exits nonzero
+for required failures and uses warnings for unknown/nonessential state.
+
+## Foundations retained
 
 Starting a task copies `demo_repo/` into `workspaces/<TASK-ID>/`, initializes an
 independent `Baseline` Git commit, and never edits the source repository. An
 existing workspace is never overwritten. Reset deletes only that validated task
 workspace, restores runtime fields to `READY`, and retains all history.
 
-Difficulty routing remains configuration-driven:
+Initial difficulty routing remains configuration-driven:
 
 | Difficulty | Tier | Default Claude alias |
 | --- | --- | --- |
@@ -202,8 +265,8 @@ are never stored in platform events.
 
 Each task has a structured pytest target. Claude may run tests, but the platform
 always invokes its own bounded `python -m pytest ...` command with `shell=False`.
-A failed verification is returned for one configured retry in the same
-workspace.
+A failed verification is returned to the next attempt in the same workspace.
+The per-tier attempt count and escalation progression are bounded.
 
 ## Setup
 
@@ -220,10 +283,32 @@ python -m pip install -e ".[dev]"
 Copy `.env.example` to `.env` only for intentional local overrides. `.env`,
 credentials, SDK state, databases, workspaces, and caches are ignored by Git.
 
+For a future Linux host, after cloning the repository:
+
+```sh
+cd ai-platform-demo
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install -e .
+claude auth login
+ai-platform doctor
+ai-platform tasks
+```
+
+Alternatively, `scripts/setup_linux.sh` checks Python 3.12+, creates the virtual
+environment, installs the package, creates only configured runtime directories,
+and runs `doctor`. It performs no `sudo`, user, SSH, firewall, service, or secret
+configuration. Phase 5 must choose a shared Unix group and restrictive group
+ownership/permissions for the install, data directory, workspaces, and SQLite
+files before exposing the CLI to multiple SSH users; `777` permissions are not
+recommended.
+
 ## Configuration
 
 | Variable | Default |
 | --- | --- |
+| `AI_PLATFORM_TASK_FILE` | `tasks.json` |
+| `AI_PLATFORM_DEMO_REPO` | `demo_repo/` |
 | `AI_PLATFORM_DATA_DIR` | `data/` |
 | `AI_PLATFORM_WORKSPACE_ROOT` | `workspaces/` |
 | `AI_PLATFORM_DB_PATH` | `data/platform.db` |
@@ -235,7 +320,9 @@ credentials, SDK state, databases, workspaces, and caches are ignored by Git.
 | `AI_PLATFORM_AGENT_TIMEOUT_SECONDS` | `300` |
 | `AI_PLATFORM_AGENT_MAX_TURNS` | `8` |
 | `AI_PLATFORM_VERIFICATION_TIMEOUT_SECONDS` | `60` |
-| `AI_PLATFORM_MAX_ATTEMPTS` | `2` |
+| `AI_PLATFORM_MAX_ATTEMPTS_PER_TIER` | `2` |
+| `AI_PLATFORM_LOCK_HEARTBEAT_SECONDS` | `5` |
+| `AI_PLATFORM_LOCK_STALE_SECONDS` | `60` |
 | `AI_PLATFORM_USER` | OS username (development only) |
 | `ANTHROPIC_API_KEY` | unset |
 
@@ -248,7 +335,10 @@ pytest
 ruff check .
 ```
 
-Coverage includes identity resolution, actor attribution, multi-human shared
+Coverage includes initial routing, deterministic cheap/default escalation,
+strong exhaustion, continuation without downgrade, execution IDs, healthy and
+stale locks, heartbeat refresh, audited crash recovery, portable configuration,
+read-only diagnostics, clean auth failure, identity resolution, actor attribution, multi-human shared
 history, append-only deterministic event order, follow cursors, concurrent
 SQLite/CLI writers, one active agent turn, pause behavior, shell exclusion and
 Git change attribution, same-workspace resume, rejection, approval, and source
@@ -260,14 +350,20 @@ tasks. Run that red baseline only when desired with `pytest demo_repo/tests`.
 ## Current limitations
 
 - Local copied workspaces are logical isolation, not a security sandbox.
-- A process crash can leave a durable workspace lock requiring an explicit
-  operator reset/recovery procedure; lease recovery is deferred.
+- Lease recovery is intentionally single-host and conservative. Expired locks
+  owned by a different host or an unverifiable process require operator review.
+- The heartbeat is a SQLite lease for this demo, not a distributed consensus
+  or fencing-token system.
 - Messages received during an active turn are durable but do not start an
   automatic queued worker turn.
 - Shell attribution is file-level Git state, not exact command auditing.
 - SQLite polling is suitable for this CLI/SSH demo, not the later hosted UI.
-- There is no SSO, RBAC, remote deployment, PR creation, or model escalation.
+- Environment credential/model availability cannot be proven without a real
+  provider request; `doctor` reports that uncertainty.
+- There is no SSO, RBAC, remote deployment, service manager, PR creation, or
+  finalized multi-user Unix permission policy.
 
-The recommended next phase is model routing/escalation and stronger recovery
-semantics around the same TaskSession core. A hosted UI and production sandbox
-should remain separate later phases.
+The recommended next phase is a controlled Linux VPS installation with
+individual SSH users, a shared Unix group, a shared platform install, explicit
+runtime ownership, Claude authentication, and a real multi-user demo. A hosted
+UI and production sandbox remain separate later phases.
