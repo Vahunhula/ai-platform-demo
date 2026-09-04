@@ -20,7 +20,7 @@ execution is included in this phase.
                           │
               ┌───────────┼───────────┐
               │           │           │
-            Vakho       Alex        David
+            Vakho       Alex          An
              SSH         SSH          SSH
               │           │           │
               └───────────┼───────────┘
@@ -57,6 +57,12 @@ or shared. Each user who will invoke Claude must complete the supported
 `claude auth login`; infrastructure-only rehearsal uses `FakeAgentExecutor` in
 tests. See `docs/demo-runbook.md` for the exact presentation sequence.
 
+For the frozen Demo 1 deployment, Vakho has external SSH and real Claude
+execution. Alex and An have distinct, platform-ready Unix identities and were
+validated through server-side simulation; their external SSH access remains
+pending public-key installation, and real continuations require their own
+Claude logins.
+
 ## Phase 4 - Routing and reliability
 
 Task difficulty chooses only the initial tier. Deterministic verification is
@@ -85,7 +91,7 @@ monotonic task counter, while the retry threshold applies per tier within a turn
                           |
                   Shared TaskSession
                   /       |       \
-             Vakho       Alex     David
+             Vakho       Alex       An
                   \       |       /
                        Claude
                           |

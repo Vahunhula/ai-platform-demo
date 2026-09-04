@@ -30,7 +30,14 @@ def build_verification_command(task: TaskDefinition) -> list[str]:
 
     if task.verification.type is not VerificationType.PYTEST:
         raise ValueError(f"Unsupported verification type: {task.verification.type}")
-    return [sys.executable, "-m", "pytest", *task.verification.targets]
+    return [
+        sys.executable,
+        "-m",
+        "pytest",
+        "-p",
+        "no:cacheprovider",
+        *task.verification.targets,
+    ]
 
 
 def verify_task(task: TaskDefinition, workspace: Path, timeout_seconds: int) -> VerificationResult:
