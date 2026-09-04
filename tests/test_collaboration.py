@@ -22,7 +22,7 @@ from ai_platform.router import ModelRouter
 from ai_platform.sessions import TaskSessionError, TaskSessionService
 from ai_platform.storage import SQLiteStorage
 from ai_platform.task_loader import get_task, load_tasks
-from ai_platform.workspace import LocalWorkspaceProvider
+from ai_platform.workspace import LocalWorkspaceProvider, WorkspaceError
 from tests.fakes import FakeAgentExecutor
 
 
@@ -259,6 +259,23 @@ def test_shared_takeover_resume_reject_and_human_approval(tmp_path: Path) -> Non
         for event in events
     )
     assert source.read_bytes() == source_before
+
+
+def test_shell_releases_lock_when_initial_workspace_snapshot_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, storage, workspaces = _service(tmp_path, FakeAgentExecutor())
+    service.start("DEMO-1", _human("vakho"))
+    service.pause("DEMO-1", _human("david"))
+
+    def fail_snapshot(_task_id: str):
+        raise WorkspaceError("snapshot failed")
+
+    monkeypatch.setattr(workspaces, "snapshot", fail_snapshot)
+    with pytest.raises(WorkspaceError, match="snapshot failed"):
+        service.shell("DEMO-1", _human("david"), runner=lambda _path: 0)
+
+    assert storage.get_task("DEMO-1").active_execution is None
 
 
 def test_second_message_cannot_race_agent_and_pause_stops_next_turn(tmp_path: Path) -> None:

@@ -1,5 +1,6 @@
 """Tests for durable task state and append-only events."""
 
+import stat
 from pathlib import Path
 
 from ai_platform.events import ActorType, Event, EventType
@@ -32,6 +33,7 @@ def test_persists_task_state_across_storage_instances(tmp_path: Path) -> None:
 
     assert task is not None
     assert task.status is TaskStatus.ANALYZING
+    assert db_path.stat().st_mode & stat.S_IWGRP
 
 
 def test_appends_events_in_order(tmp_path: Path) -> None:

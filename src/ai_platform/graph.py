@@ -26,7 +26,7 @@ from ai_platform.models import (
     VerificationStatus,
 )
 from ai_platform.router import ModelRouter
-from ai_platform.storage import SQLiteStorage
+from ai_platform.storage import SQLiteStorage, ensure_group_writable_sqlite_files
 from ai_platform.verification import build_verification_command, verify_task
 from ai_platform.workspace import WorkspaceProvider
 
@@ -87,9 +87,11 @@ def run_task_graph(
     current_execution_id = execution_id or str(uuid4())
     os.environ.setdefault("LANGGRAPH_STRICT_MSGPACK", "true")
     connection = sqlite3.connect(checkpoint_db_path, check_same_thread=False)
+    ensure_group_writable_sqlite_files(checkpoint_db_path)
     try:
         connection.execute("PRAGMA journal_mode = WAL")
         connection.execute("PRAGMA busy_timeout = 5000")
+        ensure_group_writable_sqlite_files(checkpoint_db_path)
         checkpointer = SqliteSaver(connection)
         graph = _build_graph(
             task,
@@ -129,6 +131,7 @@ def run_task_graph(
         }
         return graph.invoke(initial_state, config=config)
     finally:
+        ensure_group_writable_sqlite_files(checkpoint_db_path)
         connection.close()
 
 

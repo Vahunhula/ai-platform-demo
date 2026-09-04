@@ -3,6 +3,7 @@
 import json
 import re
 import shutil
+import stat
 import subprocess
 from abc import ABC, abstractmethod
 from hashlib import sha256
@@ -111,6 +112,7 @@ class LocalWorkspaceProvider(WorkspaceProvider):
                     "__pycache__", "*.pyc", ".pytest_cache", ".ruff_cache"
                 ),
             )
+            self._prepare_shared_tree(workspace)
             self._initialize_git(workspace, git)
         except Exception:
             if workspace.exists() and workspace.parent.resolve() == self.root:
@@ -205,6 +207,17 @@ class LocalWorkspaceProvider(WorkspaceProvider):
         self._git(workspace, "commit", "-m", "Baseline", executable=git)
 
     @staticmethod
+    def _prepare_shared_tree(workspace: Path) -> None:
+        """Allow trusted members of the workspace's inherited group to collaborate."""
+
+        for path in (workspace, *workspace.rglob("*")):
+            mode = path.stat().st_mode
+            if path.is_dir():
+                path.chmod(mode | stat.S_IRGRP | stat.S_IWGRP | stat.S_IXGRP | stat.S_ISGID)
+            else:
+                path.chmod(mode | stat.S_IRGRP | stat.S_IWGRP)
+
+    @staticmethod
     def _git(
         workspace: Path, *arguments: str, executable: str | None = None
     ) -> subprocess.CompletedProcess[str]:
@@ -212,7 +225,7 @@ class LocalWorkspaceProvider(WorkspaceProvider):
         if not git:
             raise WorkspaceError("Git is required but was not found")
         completed = subprocess.run(
-            [git, *arguments],
+            [git, "-c", f"safe.directory={workspace.resolve()}", *arguments],
             cwd=workspace,
             check=False,
             capture_output=True,

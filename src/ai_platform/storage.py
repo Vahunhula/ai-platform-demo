@@ -2,6 +2,7 @@
 
 import json
 import sqlite3
+import stat
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -20,6 +21,19 @@ from ai_platform.models import (
 )
 
 _BUSY_TIMEOUT_MILLISECONDS = 5000
+
+
+def ensure_group_writable_sqlite_files(db_path: Path) -> None:
+    """Keep a shared SQLite database and its transient sidecars group writable."""
+
+    for path in (db_path, Path(f"{db_path}-wal"), Path(f"{db_path}-shm")):
+        try:
+            mode = path.stat().st_mode
+        except FileNotFoundError:
+            continue
+        required = stat.S_IRGRP | stat.S_IWGRP
+        if mode & required != required:
+            path.chmod(mode | required)
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,6 +55,7 @@ class SQLiteStorage:
     @contextmanager
     def _connect(self, *, immediate: bool = False) -> Iterator[sqlite3.Connection]:
         connection = sqlite3.connect(self.db_path, timeout=5.0)
+        ensure_group_writable_sqlite_files(self.db_path)
         connection.row_factory = sqlite3.Row
         connection.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MILLISECONDS}")
         connection.execute("PRAGMA foreign_keys = ON")
@@ -53,6 +68,7 @@ class SQLiteStorage:
             connection.rollback()
             raise
         finally:
+            ensure_group_writable_sqlite_files(self.db_path)
             connection.close()
 
     def initialize(self) -> None:

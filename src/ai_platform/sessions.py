@@ -248,22 +248,22 @@ class TaskSessionService:
                 )
             raise self._lock_error(task.id, lock)
 
-        workspace = self.workspaces.get_path(task.id)
-        before = self.workspaces.snapshot(task.id)
-        self._append_human_event(
-            task.id,
-            EventType.HUMAN_SHELL_OPENED,
-            human,
-            {
-                "workspace": str(workspace),
-                "execution_id": execution_id,
-                "changed_files_before": sorted(before.files),
-                "git_state_before": before.fingerprint,
-            },
-        )
-        exit_code: int | None = None
-        changes: list[FileChange] = []
         try:
+            workspace = self.workspaces.get_path(task.id)
+            before = self.workspaces.snapshot(task.id)
+            self._append_human_event(
+                task.id,
+                EventType.HUMAN_SHELL_OPENED,
+                human,
+                {
+                    "workspace": str(workspace),
+                    "execution_id": execution_id,
+                    "changed_files_before": sorted(before.files),
+                    "git_state_before": before.fingerprint,
+                },
+            )
+            exit_code: int | None = None
+            changes: list[FileChange] = []
             try:
                 with self.locks.heartbeat(task.id, lock.owner_token):
                     exit_code = (runner or self._run_interactive_shell)(workspace)
@@ -290,9 +290,9 @@ class TaskSessionService:
                         "git_state_after": after.fingerprint,
                     },
                 )
+            return changes
         finally:
             self.storage.release_execution(task.id, lock.owner_token)
-        return changes
 
     def resume(
         self,

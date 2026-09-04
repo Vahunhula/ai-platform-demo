@@ -1,5 +1,6 @@
 """Tests for task-owned copied Git workspaces."""
 
+import stat
 import subprocess
 from pathlib import Path
 
@@ -17,6 +18,8 @@ def test_creates_clean_git_workspace_without_modifying_source(tmp_path: Path) ->
     workspace = provider.create("DEMO-1")
 
     assert (workspace / ".git").is_dir()
+    assert workspace.stat().st_mode & stat.S_ISGID
+    assert (workspace / "app" / "messages.py").stat().st_mode & stat.S_IWGRP
     assert (workspace / "app" / "messages.py").read_bytes() == original
     assert provider.get_changed_files("DEMO-1") == []
     log = subprocess.run(

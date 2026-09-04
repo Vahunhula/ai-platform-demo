@@ -1,9 +1,8 @@
 # AI Platform Demo
 
 AI Platform Demo is a proof of concept for a shared, persistent, task-owned AI
-software-development workflow. Phase 4 adds evidence-based model escalation,
-execution leases, safe crash recovery, and Linux deployment preparation around
-the shared collaboration workflow built in Phases 1-3.
+software-development workflow. Phase 5 deploys the Phase 4 orchestration and
+recovery design as a hosted multi-user SSH demonstration.
 
 The central rule is:
 
@@ -11,9 +10,52 @@ The central rule is:
 one task = one shared TaskSession = one workspace + one append-only history
 ```
 
-No Docker, web UI, Jira, SSH provisioning, PostgreSQL, Odoo, pull requests,
-SSO, or multi-provider execution is included in this phase. Phase 4 prepares
-for a server deployment; it does not claim that a VPS has been tested or deployed.
+No Docker, web UI, Jira, PostgreSQL, Odoo, pull requests, SSO, or multi-provider
+execution is included in this phase.
+
+## Phase 5 - Hosted Multi-User SSH Demo
+
+```text
+                         VPS
+                          │
+              ┌───────────┼───────────┐
+              │           │           │
+            Vakho       Alex        David
+             SSH         SSH          SSH
+              │           │           │
+              └───────────┼───────────┘
+                          │
+                     ai-platform CLI
+                          │
+                    Shared TaskSession
+                          │
+               /var/lib/ai-platform
+                    │            │
+                 SQLite      workspace
+                                  │
+                                Claude
+```
+
+Each person has a distinct, non-root Linux account. With `AI_PLATFORM_USER`
+unset, the SSH/OS username becomes the durable human `actor_id`. The accounts
+share only the trusted `ai-platform` Unix group: application code is
+administrator-owned and read-only to that group, while the dedicated runtime
+tree is group-writable and setgid. The command wrapper applies `umask 0002`, so
+new workspace content remains collaborative without using `777` permissions.
+
+Application code and its shared virtual environment live at
+`/opt/ai-platform-demo`. SQLite databases and copied task workspaces live only
+under `/var/lib/ai-platform`; runtime state is never written into the checkout.
+SQLite database, WAL, SHM, and LangGraph checkpoint files are kept group
+read/write. Workspace directories inherit the shared group, use setgid, and
+their files are group-writable. Git trust is limited to the administrator-owned
+checkout and the three dedicated demo workspaces.
+
+Claude Code authentication is per Unix account because the CLI process that
+starts or resumes a turn also starts the Agent SDK. Credentials are never copied
+or shared. Each user who will invoke Claude must complete the supported
+`claude auth login`; infrastructure-only rehearsal uses `FakeAgentExecutor` in
+tests. See `docs/demo-runbook.md` for the exact presentation sequence.
 
 ## Phase 4 - Routing and reliability
 
@@ -283,7 +325,7 @@ python -m pip install -e ".[dev]"
 Copy `.env.example` to `.env` only for intentional local overrides. `.env`,
 credentials, SDK state, databases, workspaces, and caches are ignored by Git.
 
-For a future Linux host, after cloning the repository:
+For a standalone Linux development host, after cloning the repository:
 
 ```sh
 cd ai-platform-demo
@@ -360,10 +402,9 @@ tasks. Run that red baseline only when desired with `pytest demo_repo/tests`.
 - SQLite polling is suitable for this CLI/SSH demo, not the later hosted UI.
 - Environment credential/model availability cannot be proven without a real
   provider request; `doctor` reports that uncertainty.
-- There is no SSO, RBAC, remote deployment, service manager, PR creation, or
-  finalized multi-user Unix permission policy.
+- There is no SSO, RBAC, service manager, PR creation, or production-grade
+  authorization policy.
+- Every Unix user who invokes Claude needs their own supported Claude login;
+  Phase 5 does not introduce a central execution daemon.
 
-The recommended next phase is a controlled Linux VPS installation with
-individual SSH users, a shared Unix group, a shared platform install, explicit
-runtime ownership, Claude authentication, and a real multi-user demo. A hosted
-UI and production sandbox remain separate later phases.
+A hosted UI and production sandbox remain separate later phases.
