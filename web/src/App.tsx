@@ -4,6 +4,7 @@ import { api } from "./api/client";
 import { type StreamState, useTaskStream } from "./api/useTaskStream";
 import { ChatPanel } from "./components/ChatPanel";
 import { TaskOverview } from "./components/TaskOverview";
+import { TaskControls } from "./components/TaskControls";
 import { TaskSidebar } from "./components/TaskSidebar";
 import { DiffTab, TestsTab, TraceTab } from "./components/tabs";
 import type {
@@ -243,6 +244,26 @@ function App() {
                 <span className={`hero-status status-${detail.status.toLowerCase()}`}>
                   {detail.status}
                 </span>
+              </section>
+
+              <section className="task-state">
+                <div className="state-chips">
+                  {detail.agent_working && (
+                    <span className="chip chip-working">
+                      <span className="spinner" aria-hidden="true" /> Agent working
+                    </span>
+                  )}
+                  {detail.pause_requested && <span className="chip chip-warn">Pause requested</span>}
+                  {detail.queued_messages > 0 && (
+                    <span className="chip chip-warn">{detail.queued_messages} queued message(s)</span>
+                  )}
+                  <span className="chip">Writer: {detail.writer ?? "none"}</span>
+                  <span className="chip">Verification: {detail.verification_status}</span>
+                  <span className="chip">
+                    Model: {[detail.model_tier, detail.model_name].filter(Boolean).join(" / ") || "not selected"}
+                  </span>
+                </div>
+                <TaskControls detail={detail} onChanged={() => scheduleRefresh(detail.id)} />
               </section>
 
               <TaskOverview detail={detail} />

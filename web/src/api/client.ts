@@ -1,5 +1,7 @@
 import type {
   ConfigResponse,
+  ControlRequest,
+  ControlResponse,
   ConversationMessage,
   DiffResponse,
   PlatformEvent,
@@ -65,6 +67,12 @@ export const api = {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
+    }),
+  control: (taskId: string, { action, ...body }: ControlRequest) =>
+    request<ControlResponse>(`${task(taskId)}/${action}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: Object.keys(body).length ? JSON.stringify(body) : undefined,
     }),
   streamUrl: (taskId: string, afterSequence: number) =>
     `${API_BASE}${task(taskId)}/stream?after=${afterSequence}`,

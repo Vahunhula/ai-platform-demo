@@ -1,6 +1,7 @@
 import { type KeyboardEvent, useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import { ApiError, api } from "../api/client";
+import { newClientId } from "../api/ids";
 import type { ConfigResponse, ConversationMessage, TaskDetail } from "../types/api";
 import { formatTime } from "./format";
 
@@ -10,11 +11,6 @@ interface PendingMessage {
   text: string;
   state: "sending" | "accepted" | "failed";
   error?: string;
-}
-
-function newClientMessageId(): string {
-  if (typeof crypto !== "undefined" && "randomUUID" in crypto) return crypto.randomUUID();
-  return `m-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
 }
 
 const STATUS_LABEL: Record<string, string> = {
@@ -107,7 +103,7 @@ export function ChatPanel({ detail, config, messages, onSubmitted }: Props) {
     if (!text || disabledReason || text.length > maxLength) return;
     setDraft("");
     stickToBottom.current = true;
-    void send(text, newClientMessageId());
+    void send(text, newClientId());
   }
 
   function onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {

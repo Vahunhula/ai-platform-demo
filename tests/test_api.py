@@ -237,7 +237,7 @@ def test_api_context_does_not_recover_locks(
     assert calls[0].startswith("cli-startup@")
 
 
-def test_only_mutation_route_is_posting_a_message() -> None:
+def test_mutation_routes_are_exactly_messages_and_lifecycle_controls() -> None:
     mutations = {
         (route.path, method)
         for route in create_app().routes
@@ -246,4 +246,7 @@ def test_only_mutation_route_is_posting_a_message() -> None:
         if method not in {"GET", "HEAD"}
     }
 
-    assert mutations == {("/api/tasks/{task_id}/messages", "POST")}
+    assert mutations == {
+        (f"/api/tasks/{{task_id}}/{name}", "POST")
+        for name in ("messages", "start", "pause", "resume", "approve", "reject", "reset")
+    }

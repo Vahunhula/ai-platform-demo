@@ -34,6 +34,14 @@ class TaskNotFoundError(TaskSessionError):
     """The requested task ID has no definition or no persisted runtime state."""
 
 
+class TaskLockedError(TaskSessionError):
+    """Another live execution owns the task's workspace writer lock."""
+
+
+class ExecutorUnavailableError(TaskSessionError):
+    """The configured agent executor failed its preflight check."""
+
+
 @dataclass(frozen=True, slots=True)
 class TaskSession:
     """The durable task definition, runtime state, workspace, and shared history."""
@@ -74,6 +82,25 @@ class TurnOutcome:
     queued: bool = False
     state: TaskGraphState | None = None
     detail: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedTurn:
+    """An agent turn whose preconditions passed and whose writer lock is already held.
+
+    ``prepare_*`` methods do the quick part of a lifecycle command (checks, intent
+    events, executor preflight, lock acquisition) exactly as the CLI always has;
+    ``run_prepared`` runs the long part. The CLI runs both back to back; the HTTP
+    API returns after preparing and runs the turn in the background runner.
+    """
+
+    task: TaskDefinition
+    human: HumanIdentity
+    owner: str
+    execution_id: str
+    executor: AgentExecutor
+    continuation: bool
+    through_sequence_id: int | None = None
 
 
 class TaskSessionService:
@@ -153,6 +180,17 @@ class TaskSessionService:
     def start(self, task_id: str, human: HumanIdentity) -> TurnOutcome:
         """Start the initial agent turn in a newly copied workspace."""
 
+        return self.run_prepared(self.prepare_start(task_id, human))
+
+    def prepare_start(
+        self,
+        task_id: str,
+        human: HumanIdentity,
+        *,
+        execution_id: str | None = None,
+    ) -> PreparedTurn:
+        """Check a READY task, preflight the executor and take its writer lock."""
+
         task = self._definition(task_id)
         record = self._record(task.id)
         if self.workspaces.exists(task.id):
@@ -164,7 +202,7 @@ class TaskSessionService:
                 f"{task.id} is {record.status.value.upper()}; reset it before a new start."
             )
         executor = self._preflight_executor()
-        execution_id = str(uuid4())
+        execution_id = execution_id or str(uuid4())
         lock = self.locks.acquire(
             task.id,
             ExecutionKind.AGENT,
@@ -174,13 +212,19 @@ class TaskSessionService:
         )
         if not lock.acquired:
             raise self._lock_error(task.id, lock)
+        return PreparedTurn(task, human, lock.owner_token, execution_id, executor, False)
+
+    def run_prepared(self, prepared: PreparedTurn) -> TurnOutcome:
+        """Run a prepared turn to its end; the writer lock is always released."""
+
         state = self._run_agent_turn(
-            task,
-            human,
-            lock.owner_token,
-            execution_id,
-            executor,
-            continuation=False,
+            prepared.task,
+            prepared.human,
+            prepared.owner,
+            prepared.execution_id,
+            prepared.executor,
+            continuation=prepared.continuation,
+            through_sequence_id=prepared.through_sequence_id,
         )
         return TurnOutcome(agent_started=True, state=state)
 
@@ -375,6 +419,18 @@ class TaskSessionService:
     ) -> TurnOutcome:
         """Continue from the current human-edited workspace after a pause."""
 
+        return self.run_prepared(self.prepare_resume(task_id, human, message))
+
+    def prepare_resume(
+        self,
+        task_id: str,
+        human: HumanIdentity,
+        message: str | None = None,
+        *,
+        execution_id: str | None = None,
+    ) -> PreparedTurn:
+        """Record the resume (and optional instruction) and take the writer lock."""
+
         task = self._definition(task_id)
         record = self._record(task.id)
         if record.status is not TaskStatus.PAUSED_BY_HUMAN:
@@ -388,7 +444,7 @@ class TaskSessionService:
                 {"message": content},
             )
         executor = self._preflight_executor()
-        execution_id = str(uuid4())
+        execution_id = execution_id or str(uuid4())
         lock = self.locks.acquire(
             task.id,
             ExecutionKind.AGENT,
@@ -399,18 +455,27 @@ class TaskSessionService:
         if not lock.acquired:
             raise self._lock_error(task.id, lock)
         self._append_human_event(task.id, EventType.HUMAN_RESUMED, human)
-        state = self._run_agent_turn(
-            task,
-            human,
-            lock.owner_token,
-            execution_id,
-            executor,
-            continuation=True,
-        )
-        return TurnOutcome(agent_started=True, state=state)
+        return PreparedTurn(task, human, lock.owner_token, execution_id, executor, True)
 
     def reject(self, task_id: str, message: str, human: HumanIdentity) -> TurnOutcome:
         """Record review rejection and continue against the same workspace."""
+
+        prepared = self.prepare_reject(task_id, message, human)
+        return prepared if isinstance(prepared, TurnOutcome) else self.run_prepared(prepared)
+
+    def prepare_reject(
+        self,
+        task_id: str,
+        message: str,
+        human: HumanIdentity,
+        *,
+        execution_id: str | None = None,
+    ) -> PreparedTurn | TurnOutcome:
+        """Record the rejection feedback and take the lock for the correction turn.
+
+        Returns a not-started ``TurnOutcome`` (feedback recorded, no turn) when
+        another writer won the lock, exactly as the CLI always reported it.
+        """
 
         task = self._definition(task_id)
         content = self._validate_message(message)
@@ -431,7 +496,9 @@ class TaskSessionService:
             human,
             {"message": content},
         )
-        return self._try_continuation(task, human, {TaskStatus.WAITING_FOR_HUMAN})
+        return self._prepare_continuation(
+            task, human, {TaskStatus.WAITING_FOR_HUMAN}, execution_id=execution_id
+        )
 
     def approve(self, task_id: str, human: HumanIdentity) -> None:
         """Attribute and persist a human approval decision."""
@@ -496,6 +563,24 @@ class TaskSessionService:
         execution_id: str | None = None,
         through_sequence_id: int | None = None,
     ) -> TurnOutcome:
+        prepared = self._prepare_continuation(
+            task,
+            human,
+            allowed_statuses,
+            execution_id=execution_id,
+            through_sequence_id=through_sequence_id,
+        )
+        return prepared if isinstance(prepared, TurnOutcome) else self.run_prepared(prepared)
+
+    def _prepare_continuation(
+        self,
+        task: TaskDefinition,
+        human: HumanIdentity,
+        allowed_statuses: set[TaskStatus],
+        *,
+        execution_id: str | None = None,
+        through_sequence_id: int | None = None,
+    ) -> PreparedTurn | TurnOutcome:
         executor = self._preflight_executor()
         execution_id = execution_id or str(uuid4())
         lock = self.locks.acquire(
@@ -517,16 +602,15 @@ class TaskSessionService:
                     else f"Message recorded; {task.id} is now {latest.status.value.upper()}."
                 ),
             )
-        state = self._run_agent_turn(
+        return PreparedTurn(
             task,
             human,
             lock.owner_token,
             execution_id,
             executor,
-            continuation=True,
-            through_sequence_id=through_sequence_id,
+            True,
+            through_sequence_id,
         )
-        return TurnOutcome(agent_started=True, state=state)
 
     def _run_agent_turn(
         self,
@@ -714,10 +798,12 @@ class TaskSessionService:
         try:
             executor.preflight()
         except AgentExecutorError as error:
-            raise TaskSessionError(str(error)) from error
+            raise ExecutorUnavailableError(str(error)) from error
         except Exception as error:
             message = str(error) or type(error).__name__
-            raise TaskSessionError(f"Agent executor preflight failed: {message[:1000]}") from error
+            raise ExecutorUnavailableError(
+                f"Agent executor preflight failed: {message[:1000]}"
+            ) from error
         return executor
 
     def _lock_error(self, task_id: str, acquisition: LockAcquisition) -> TaskSessionError:
@@ -728,7 +814,7 @@ class TaskSessionService:
             )
         record = acquisition.current
         if record is None or record.active_execution is None:
-            return TaskSessionError(f"{task_id} could not acquire its workspace lock")
+            return TaskLockedError(f"{task_id} could not acquire its workspace lock")
         inspection = self.locks.inspect(record)
         age = (
             f"{inspection.heartbeat_age_seconds:.1f}s ago"
@@ -736,7 +822,7 @@ class TaskSessionService:
             else "unknown"
         )
         actor = record.execution_actor_id or record.execution_owner or "unknown"
-        return TaskSessionError(
+        return TaskLockedError(
             f"{task_id} has a {inspection.health.value} {record.active_execution.value} lock "
             f"owned by {actor} on {record.execution_hostname or 'unknown host'} "
             f"(pid {record.execution_pid or 'unknown'}, heartbeat {age})."

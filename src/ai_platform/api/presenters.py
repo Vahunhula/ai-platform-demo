@@ -15,14 +15,17 @@ from pathlib import Path
 from typing import Any
 
 from ai_platform.api.schemas import (
+    ActionState,
     EventResponse,
     MessageResponse,
     MessagingState,
+    TaskActions,
     TaskDetailResponse,
     TaskListItem,
     VerificationResultResponse,
 )
 from ai_platform.config import Settings
+from ai_platform.controls import ActionAvailability, ControlAction
 from ai_platform.conversation import ConversationEntry, ConversationService
 from ai_platform.events import Event, EventType
 from ai_platform.models import (
@@ -200,6 +203,7 @@ class Presenter:
         session: TaskSession,
         conversation: ConversationService,
         queued_messages: int,
+        actions: dict[ControlAction, ActionAvailability],
     ) -> TaskDetailResponse:
         record = session.record
         reason = conversation.acceptance(record)
@@ -215,8 +219,18 @@ class Presenter:
             verification_status=record.verification_status.value.upper(),
             verification_result=self._verification_result(session.events),
             agent_working=record.active_execution is ExecutionKind.AGENT,
+            pause_requested=record.pause_requested,
             queued_messages=queued_messages,
             messaging=MessagingState(accepting=reason is None, reason=reason),
+            actions=TaskActions(
+                **{
+                    action.value: ActionState(
+                        allowed=state.allowed,
+                        reason=self.redactor.text(state.reason) if state.reason else None,
+                    )
+                    for action, state in actions.items()
+                }
+            ),
             created_at=record.created_at,
         )
 

@@ -569,6 +569,22 @@ class SQLiteStorage:
             ).fetchone()
         return self._event_from_row(row) if row else None
 
+    def execution_recorded(self, task_id: str, execution_id: str) -> bool:
+        """Return whether an execution ID holds the task lock or appears in its history."""
+
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT 1 FROM tasks WHERE task_id = ? AND execution_id = ?
+                UNION ALL
+                SELECT 1 FROM events
+                WHERE task_id = ? AND json_extract(metadata_json, '$.execution_id') = ?
+                LIMIT 1
+                """,
+                (task_id, execution_id, task_id, execution_id),
+            ).fetchone()
+        return row is not None
+
     def enqueue_message(
         self,
         event: Event,

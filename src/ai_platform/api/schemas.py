@@ -50,6 +50,22 @@ class MessagingState(BaseModel):
     reason: str | None
 
 
+class ActionState(BaseModel):
+    """Whether a lifecycle action is currently allowed, decided by the backend."""
+
+    allowed: bool
+    reason: str | None
+
+
+class TaskActions(BaseModel):
+    start: ActionState
+    pause: ActionState
+    resume: ActionState
+    approve: ActionState
+    reject: ActionState
+    reset: ActionState
+
+
 class TaskDetailResponse(TaskListItem):
     description: str
     acceptance_criteria: list[str]
@@ -59,8 +75,10 @@ class TaskDetailResponse(TaskListItem):
     verification_status: str
     verification_result: VerificationResultResponse | None
     agent_working: bool
+    pause_requested: bool
     queued_messages: int
     messaging: MessagingState
+    actions: TaskActions
     created_at: datetime
 
 
@@ -124,3 +142,74 @@ class PostMessageResponse(BaseModel):
     task_id: str
     message_status: MessageStatusName
     duplicate: bool
+
+
+ClientActionId = Field(pattern=r"^[A-Za-z0-9_-]{8,100}$")
+
+
+def _optional_message(value: str | None) -> str | None:
+    if value is None:
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
+class StartRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    client_action_id: str = ClientActionId
+
+
+class ResumeRequest(BaseModel):
+    """Optional instruction, like ``ai-platform resume TASK --message``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    client_action_id: str = ClientActionId
+    message: str | None = Field(default=None, max_length=MAX_MESSAGE_LENGTH)
+
+    @field_validator("message")
+    @classmethod
+    def normalize_message(cls, value: str | None) -> str | None:
+        return _optional_message(value)
+
+
+class RejectRequest(BaseModel):
+    """Required review feedback, like ``ai-platform reject TASK MESSAGE``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    client_action_id: str = ClientActionId
+    message: str = Field(max_length=MAX_MESSAGE_LENGTH)
+
+    @field_validator("message")
+    @classmethod
+    def message_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("Rejection feedback must not be empty")
+        return value.strip()
+
+
+class ResetRequest(BaseModel):
+    """Explicit confirmation, the HTTP equivalent of answering the CLI's prompt."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    confirm: Literal[True]
+
+
+ActionName = Literal["start", "pause", "resume", "approve", "reject", "reset"]
+
+
+class ControlResponse(BaseModel):
+    """``accepted``: an agent turn was launched in the background (202).
+    ``completed``: the state change is already done (200)."""
+
+    status: Literal["accepted", "completed"]
+    action: ActionName
+    task_id: str
+    task_status: str
+    execution_id: str | None = None
+    client_action_id: str | None = None
+    duplicate: bool = False
+    deferred: bool | None = None

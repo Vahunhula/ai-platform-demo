@@ -9,11 +9,13 @@ from fastapi.responses import JSONResponse
 
 from ai_platform.api.presenters import Presenter
 from ai_platform.api.routes.config import router as config_router
+from ai_platform.api.routes.controls import router as controls_router
 from ai_platform.api.routes.health import router as health_router
 from ai_platform.api.routes.messages import router as messages_router
 from ai_platform.api.routes.stream import router as stream_router
 from ai_platform.api.routes.tasks import router as tasks_router
 from ai_platform.application import ApplicationContext, create_application_context
+from ai_platform.controls import ActionConflictError, RunnerUnavailableError, TaskControlService
 from ai_platform.conversation import (
     ConversationService,
     IdempotencyConflictError,
@@ -21,7 +23,7 @@ from ai_platform.conversation import (
     MessagingDisabledError,
 )
 from ai_platform.runner import TaskTurnRunner
-from ai_platform.sessions import TaskNotFoundError, TaskSessionError
+from ai_platform.sessions import ExecutorUnavailableError, TaskNotFoundError, TaskSessionError
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +41,9 @@ def _wire(
         context.storage,
         context.settings.web_actor,
         on_submitted=runner.wake if runner is not None else None,
+    )
+    application.state.controls = TaskControlService(
+        context.sessions, context.storage, application.state.conversation, runner
     )
 
 
@@ -81,7 +86,10 @@ def create_app(
         _wire(application, context, runner)
 
     def error(status_code: int, message: str) -> JSONResponse:
-        return JSONResponse(status_code=status_code, content={"detail": message})
+        # Client-safe messages still pass the path redactor before leaving the server.
+        presenter = getattr(application.state, "presenter", None)
+        detail = presenter.redactor.text(message) if presenter is not None else message
+        return JSONResponse(status_code=status_code, content={"detail": detail})
 
     @application.exception_handler(TaskNotFoundError)
     async def task_not_found(_request: Request, exc: TaskNotFoundError) -> JSONResponse:
@@ -97,6 +105,20 @@ def create_app(
     ) -> JSONResponse:
         return error(409, str(exc))
 
+    @application.exception_handler(ActionConflictError)
+    async def action_conflict(_request: Request, exc: ActionConflictError) -> JSONResponse:
+        return error(409, str(exc))
+
+    @application.exception_handler(RunnerUnavailableError)
+    async def runner_unavailable(_request: Request, exc: RunnerUnavailableError) -> JSONResponse:
+        return error(503, str(exc))
+
+    @application.exception_handler(ExecutorUnavailableError)
+    async def executor_unavailable(
+        _request: Request, exc: ExecutorUnavailableError
+    ) -> JSONResponse:
+        return error(503, f"The agent executor is unavailable: {exc}")
+
     @application.exception_handler(MessagingDisabledError)
     async def messaging_disabled(_request: Request, exc: MessagingDisabledError) -> JSONResponse:
         return error(503, str(exc))
@@ -111,7 +133,14 @@ def create_app(
         logger.exception("Unhandled API error for %s %s", request.method, request.url.path)
         return error(500, "Internal server error")
 
-    for router in (health_router, config_router, tasks_router, messages_router, stream_router):
+    for router in (
+        health_router,
+        config_router,
+        tasks_router,
+        messages_router,
+        controls_router,
+        stream_router,
+    ):
         application.include_router(router, prefix="/api")
     return application
 

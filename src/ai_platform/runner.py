@@ -1,4 +1,11 @@
-"""In-process runner that executes queued browser messages through the shared core.
+"""In-process runner for browser-initiated agent turns, all through the shared core.
+
+It runs two kinds of work, never more than one turn per task at a time:
+
+- queued chat messages (below), claimed from the durable ``message_queue``;
+- lifecycle turns (start/resume/reject) that an HTTP request already prepared
+  via ``TaskSessionService.prepare_*`` — the writer lock is held before the
+  request returns, so they need no queue (``run_prepared_turn``).
 
 Correctness does not depend on this process's memory:
 
@@ -19,7 +26,7 @@ from uuid import uuid4
 
 from ai_platform.identity import HumanIdentity
 from ai_platform.models import MessageStatus, QueuedMessage, TaskStatus
-from ai_platform.sessions import TaskSessionError, TaskSessionService
+from ai_platform.sessions import PreparedTurn, TaskSessionError, TaskSessionService
 from ai_platform.storage import SQLiteStorage
 
 logger = logging.getLogger(__name__)
@@ -52,6 +59,8 @@ class TaskTurnRunner:
         self._wake = ThreadEvent()
         self._stopping = ThreadEvent()
         self._in_flight: set[str] = set()
+        # Tasks whose lifecycle turn (start/resume/reject) is running in this process.
+        self._control_turns: dict[str, int] = {}
         self._in_flight_lock = Lock()
         self._dispatcher: Thread | None = None
         self._workers: list[Thread] = []
@@ -79,6 +88,38 @@ class TaskTurnRunner:
         """Ask the dispatcher to look at the queue now instead of at the next poll."""
 
         self._wake.set()
+
+    def run_prepared_turn(self, prepared: PreparedTurn) -> None:
+        """Run a lifecycle turn whose writer lock the caller already holds, in background.
+
+        Used by browser start/resume/reject: the HTTP request prepares the turn
+        (checks, intent events, lock) and returns; the turn itself runs here. Queued
+        chat messages of the task are picked up afterwards by the dispatcher.
+        """
+
+        task_id = prepared.task.id
+        with self._in_flight_lock:
+            self._control_turns[task_id] = self._control_turns.get(task_id, 0) + 1
+
+        def work() -> None:
+            try:
+                self.sessions.run_prepared(prepared)
+            except Exception:
+                # The core already persisted TASK_FAILED and released the lock.
+                logger.exception("Lifecycle turn %s failed", prepared.execution_id)
+            finally:
+                with self._in_flight_lock:
+                    remaining = self._control_turns.get(task_id, 1) - 1
+                    if remaining:
+                        self._control_turns[task_id] = remaining
+                    else:
+                        self._control_turns.pop(task_id, None)
+                self.wake()
+
+        worker = Thread(target=work, name=f"task-lifecycle-{task_id}", daemon=True)
+        self._workers = [thread for thread in self._workers if thread.is_alive()]
+        self._workers.append(worker)
+        worker.start()
 
     # ---- synchronous API (also used directly by tests) -------------------
 
@@ -113,7 +154,7 @@ class TaskTurnRunner:
 
         failed: list[str] = []
         with self._in_flight_lock:
-            in_flight = set(self._in_flight)
+            in_flight = set(self._in_flight) | set(self._control_turns)
         for message in self.storage.running_messages():
             if message.task_id in in_flight:
                 continue
@@ -192,7 +233,8 @@ class TaskTurnRunner:
 
     def _start_worker(self, task_id: str) -> None:
         with self._in_flight_lock:
-            if task_id in self._in_flight or self._stopping.is_set():
+            busy = task_id in self._in_flight or task_id in self._control_turns
+            if busy or self._stopping.is_set():
                 return
             self._in_flight.add(task_id)
         worker = Thread(

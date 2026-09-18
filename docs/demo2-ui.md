@@ -1,4 +1,4 @@
-# Demo 2 — Web UI (Phase 1 + Phase 2)
+# Demo 2 — Web UI (Phases 1–3)
 
 Demo 2 adds a browser interface to the proven Demo 1 platform without replacing
 its task lifecycle, storage, workspace, routing, executor, or LangGraph code.
@@ -8,6 +8,9 @@ its task lifecycle, storage, workspace, routing, executor, or LangGraph code.
 - **Phase 2** (`demo2-phase2`): real task conversation — the browser can send a
   message that continues the task's shared TaskSession, with a durable FIFO
   queue, a background turn runner, and live updates over Server-Sent Events.
+- **Phase 3** (`demo2-phase3`): task lifecycle controls in the browser — start,
+  pause, resume, approve, reject, reset — through the same core methods as the
+  CLI commands of the same names. Shell/terminal stays CLI/SSH-only.
 
 **The Platform Core remains the source of truth. The API is an interface layer.
 The React UI is a presentation layer.**
@@ -17,45 +20,45 @@ The React UI is a presentation layer.**
 ```text
 Browser (React, Vite dev server :5173)
    │
-   ├── GET  /api/tasks/{id}/messages     durable conversation
-   ├── POST /api/tasks/{id}/messages     the only browser mutation (202 Accepted)
-   └── GET  /api/tasks/{id}/stream       SSE: live public events
+   ├── Chat            GET/POST /api/tasks/{id}/messages
+   ├── Task controls   POST /api/tasks/{id}/{start|pause|resume|approve|reject|reset}
+   └── SSE             GET /api/tasks/{id}/stream   (one realtime channel for everything)
    │
    ▼
-FastAPI (127.0.0.1:8765)   routes are thin; presenters.py filters + redacts output
+FastAPI (127.0.0.1:8765) — thin routes; presenters.py filters + redacts all output
    │
    ▼
-ConversationService (conversation.py)          TaskSessionService (sessions.py)
-   │  validate, idempotency, acceptance rules      ▲
-   │  HUMAN_MESSAGE event + queue row (1 txn)      │ continue_conversation()
-   ▼                                               │ (same method the CLI uses)
-SQLite: events (audit + conversation)          TaskTurnRunner (runner.py)
-        message_queue (delivery state) ──claim──►  one turn per message, FIFO
-                                                   │
-                                                   ▼
-                              writer lock → LangGraph → Claude executor
-                                                   │
-                                                   ▼
-                                  same task workspace → pytest verification
-                                                   │
-                                                   ▼
-                                           durable public events ──► SSE
+Shared platform services
+   ├── ConversationService (conversation.py)   chat: validation, idempotency, queue
+   └── TaskControlService  (controls.py)        controls: actor, availability, idempotency
+   │
+   ▼
+TaskSessionService (sessions.py) — the same methods the CLI calls
+   │   prepare_start / prepare_resume / prepare_reject   (quick: checks, intent events, lock)
+   │   run_prepared / continue_conversation               (long: the agent turn)
+   │   pause / approve / reset                            (quick state changes)
+   ▼
+TaskTurnRunner (runner.py) — background threads; one turn per task at a time
+   │
+   ▼
+writer lock → LangGraph → Claude executor → same task workspace → pytest verification
+   │
+   ▼
+append-only events ──► SSE
 ```
 
-The CLI and the browser share the **message core**:
+The CLI and the browser share one lifecycle core:
 
 ```text
-                  ┌── CLI:   ai-platform message  → record HUMAN_MESSAGE → continue_conversation()
-TaskSessionService┤
-                  └── HTTP:  POST /messages → record HUMAN_MESSAGE + queue row
-                                           → TaskTurnRunner → continue_conversation()
+                    ┌── CLI:  ai-platform start|resume|reject → prepare_* → run_prepared (same process)
+TaskSessionService ─┤          ai-platform pause|approve|reset → same method
+                    └── HTTP: POST /start|/resume|/reject → prepare_* (lock held) → 202
+                                                          → runner.run_prepared_turn()
+                              POST /pause|/approve|/reset → same method → 200
 ```
 
-`continue_conversation()` is the extracted tail of Demo 1's `message()`:
-the same status checks, `_try_continuation`, executor preflight, one-writer lock,
-`_run_agent_turn`, `run_task_graph(continuation=True)`, verification and event
-recording. The CLI does not go through HTTP and does not use the queue; its
-behavior is unchanged.
+Chat uses the Phase 2 path: the CLI's `message` and the browser runner both
+end in `continue_conversation()`.
 
 ## Conversation source of truth
 
@@ -105,7 +108,7 @@ POST ─► validate ─► HUMAN_MESSAGE event + queue row (QUEUED) ─► 202 
   `WAITING_FOR_HUMAN` (a turn starts) or a turn is in progress
   (`ANALYZING`/`IMPLEMENTING`/`VERIFYING` — the message queues). `READY`,
   `PAUSED_BY_HUMAN`, `COMPLETED` and `FAILED` return **409** with a readable
-  reason; start/resume/reset remain CLI actions.
+  reason; use the lifecycle controls (start/resume/reset) for those states.
 - **Held:** a queued message waits while a turn is running or the task is
   `PAUSED_BY_HUMAN` (e.g. a human paused mid-turn from the CLI); it becomes
   eligible again when the task returns to `WAITING_FOR_HUMAN`.
@@ -190,6 +193,84 @@ data: {}                                                        every 10 s when 
   bounds uvicorn's graceful shutdown to 3 s; clients then resume via the cursor.
 - The same presenter as `/events` is used, so SSE can never expose more.
 
+## Task lifecycle controls (Phase 3)
+
+Each browser control calls the core method behind the CLI command of the same
+name; nothing in FastAPI or React changes task state itself.
+
+| Control | Core method | Allowed when | Effect (canonical events) | HTTP |
+| --- | --- | --- | --- | --- |
+| Start | `prepare_start` + `run_prepared` | `READY`, no workspace | `TASK_STARTED`, `STATUS_CHANGED`, `WORKSPACE_CREATED`, `MODEL_SELECTED`, `AGENT_*`, `TEST_*` → `WAITING_FOR_HUMAN`/`FAILED` | 202, turn runs in background |
+| Pause | `pause` | started, not `COMPLETED`, not already paused / pause-requested | `HUMAN_PAUSED` (+ `STATUS_CHANGED`) | 200 |
+| Resume | `prepare_resume` + `run_prepared` | `PAUSED_BY_HUMAN`, no writer | optional `HUMAN_MESSAGE`, `HUMAN_RESUMED`, continuation turn | 202 |
+| Approve | `approve` (`approval.approve_task`) | `WAITING_FOR_HUMAN`, verification `PASSED`, no writer, no queued chat | `HUMAN_APPROVED`, `STATUS_CHANGED`, `TASK_COMPLETED{workspace_retained}` | 200 |
+| Reject | `prepare_reject` + `run_prepared` | `WAITING_FOR_HUMAN`, no writer | `HUMAN_REJECTED`, `HUMAN_MESSAGE`, correction turn | 202 |
+| Reset | `reset` | no writer; not already pristine `READY` | `WORKSPACE_RESET`, `TASK_RESET` | 200 |
+
+**Semantics worth knowing** (unchanged from Demo 1):
+
+- **Pause is cooperative.** With no agent running it takes effect at once. During
+  an agent turn it only sets a pause request: the SDK client is interrupted
+  cooperatively and the graph stops at its next safe point, then the task becomes
+  `PAUSED_BY_HUMAN`. The UI shows "Pause requested" until then; it never fakes
+  the paused state and never kills processes.
+- **Reject is not failure.** It records the feedback and immediately runs a
+  correction turn on the same workspace, followed by verification.
+- **Approve completes the platform task only** — no commit, push, merge or
+  deploy; the workspace is kept. Only a reset reopens a completed task.
+- **A task cannot be approved while accepted human instructions are still
+  queued.** Otherwise "Also fix X" could be accepted (QUEUED) and then orphaned
+  by an immediate Approve, leaving a completed task that never ran the
+  instruction. This is a platform rule in `TaskControlService`, reported as the
+  approve action's reason and enforced (409) on the request.
+- **Reset deletes the task workspace** (including uncommitted changes) and returns
+  the task to `READY` with tier, attempts and verification cleared. The event
+  history (trace, tests, conversation) is kept. Checkpoints are not deleted.
+
+**Async start/resume/reject.** The request runs the quick `prepare_*` part —
+the same checks, intent events and executor preflight as the CLI — and takes the
+task's writer lock. Then it returns **202** and the runner runs the turn. No
+turn needs a queue: they all require an idle task (otherwise 409), and holding
+the lock before replying means an accepted turn can never be overtaken. If the
+API process dies mid-turn, it is the existing stale-lock case (recovered by the
+next CLI command or lock attempt → `PAUSED_BY_HUMAN`), exactly as for a killed
+CLI turn. These three controls need `AI_PLATFORM_ENABLE_RUNNER=1`; without it
+they are reported unavailable (503 if called).
+
+**Idempotency.** Start/resume/reject require `client_action_id`. The execution
+ID is derived from it (`uuid5(task, action, client_action_id)`) and stored by
+the core in the writer lock and in every event of the turn. A retry with the
+same key finds that execution and returns the original acceptance
+(`"duplicate": true`) — no second turn. Control requests are also serialized
+per task inside the API process, so double clicks with different keys produce
+one 202 and 409s. Pause/approve/reset rely on their state preconditions (a
+repeat is a clean 409). No new table was needed.
+
+**Availability comes from the backend.** `GET /api/tasks/{id}` includes
+
+```json
+"actions": {
+  "start":   {"allowed": false, "reason": "Task can only be started from READY (it is WAITING_FOR_HUMAN)."},
+  "pause":   {"allowed": true,  "reason": null},
+  "approve": {"allowed": true,  "reason": null},
+  ...
+}
+```
+
+computed in `TaskControlService` from the core's own preconditions; the same
+check guards each request, and the core remains the final arbiter. React only
+shows the allowed buttons (plus a "Why not…" list of reasons).
+
+**Confirmation.** Resume (optional instruction), approve, reject (required
+feedback) and reset open an in-app dialog. Reset lists exactly what is deleted
+and what is kept, and its endpoint requires `{"confirm": true}` — the HTTP
+equivalent of the CLI prompt. There is no force or other destructive option.
+
+**Errors** are client-safe: e.g. "Task cannot be started because it is already
+running.", "Task cannot be approved until it is waiting for human review.",
+"Task is already paused.", "Another execution currently owns this task." (lock
+details such as host names and PIDs are never returned).
+
 ## Web actor (not authentication)
 
 Phase 2 has a **single server-configured web actor**:
@@ -198,10 +279,11 @@ Phase 2 has a **single server-configured web actor**:
 AI_PLATFORM_WEB_ACTOR=vakho      # 1-64 chars: letters, digits, . _ -
 ```
 
-- every browser message is recorded as that actor; the request schema rejects
-  any extra field (`actor_id` → 422), so the browser cannot choose an identity;
-- if unset, messaging is disabled: POST returns **503** with a configuration
-  message and the composer is read-only. It never falls back to the OS user
+- every browser message and control is recorded as that actor; request schemas
+  reject any extra field (`actor_id`, `command`, `force`… → 422), so the browser
+  cannot choose an identity or smuggle options;
+- if unset, messaging **and all lifecycle controls** are disabled: POSTs return
+  **503** with a configuration message and the UI is read-only. It never falls back to the OS user
   (the dev API may run as root);
 - **this is not authentication.** Anyone who can reach the API (loopback + SSH
   tunnel) acts as that actor. Multi-user identity and authentication belong to
@@ -242,12 +324,23 @@ commands recorded by the Demo 1 install keep their interpreter path
 | `GET /api/tasks/{id}/messages` | ordered conversation: `id, role, actor_id, content, timestamp, sequence_id, turn_id, status, error, client_message_id, channel` |
 | `POST /api/tasks/{id}/messages` | `{"message", "client_message_id"}` → **202** `{status:"accepted", message_id, client_message_id, task_id, message_status, duplicate}` |
 | `GET /api/tasks/{id}/stream` | SSE (above) |
+| `POST /api/tasks/{id}/start` | `{"client_action_id"}` → **202** |
+| `POST /api/tasks/{id}/resume` | `{"client_action_id", "message"?}` → **202** |
+| `POST /api/tasks/{id}/reject` | `{"client_action_id", "message"}` → **202** |
+| `POST /api/tasks/{id}/pause` | no body → **200** (`deferred: true` when the agent is mid-turn) |
+| `POST /api/tasks/{id}/approve` | no body → **200** |
+| `POST /api/tasks/{id}/reset` | `{"confirm": true}` → **200** |
 
-Errors: 404 unknown task · 409 state cannot receive messages / idempotency key
-reused · 422 invalid body (empty, > 8000 chars, extra fields, bad key, bad
-`Last-Event-ID`) · 503 messaging not configured · 500 `{"detail":"Internal server
-error"}` with details only in the server log. `POST /messages` is the only
-non-GET route (asserted by a test).
+Control responses: `{status: "accepted"|"completed", action, task_id,
+task_status, execution_id, client_action_id, duplicate, deferred}`.
+
+Errors: 404 unknown task · 409 action/message not valid in the current state,
+another execution owns the task, or idempotency key reused · 422 invalid body (empty, > 8000 chars, extra fields, bad key, bad
+`Last-Event-ID`) · 503 web actor not configured,
+runner disabled (turn-launching controls) or agent executor unavailable · 500 `{"detail":"Internal server
+error"}` with details only in the server log. `POST /messages` and the six
+control routes are the only non-GET routes (asserted by a test). There is no
+shell, terminal, filesystem or command endpoint.
 
 ## UI
 
@@ -265,6 +358,11 @@ non-GET route (asserted by a test).
   refetched after workspace-changing events. Switching tasks closes the old
   stream and opens a new one after the new task's history is loaded.
 - **Header:** web actor, stream state (`live` / `reconnecting…`), Refresh.
+- **Task header (Phase 3):** status, live chips (Agent working, Pause requested,
+  queued messages, writer, verification, model), and only the lifecycle buttons
+  the backend allows, with "Why not…" reasons for the rest. Each action shows
+  working → accepted/error feedback; retryable failures keep their idempotency
+  key. State and buttons then update from SSE without a page refresh.
 
 ## Run on the Demo VPS
 
@@ -287,7 +385,9 @@ cd /root/ai-platform-demo-demo2
 AI_PLATFORM_WEB_ACTOR=vakho AI_PLATFORM_ENABLE_RUNNER=1 ./scripts/serve_api_dev.sh
 ```
 
-Without the two variables the API is read-only (Phase 1 behavior). The
+Without the two variables the API is read-only (Phase 1 behavior); with only
+`AI_PLATFORM_WEB_ACTOR`, chat messages queue and quick controls (pause, approve,
+reset) work, but nothing launches an agent turn. The
 launcher mirrors `/usr/local/bin/ai-platform` (`umask 0002`, shared runtime
 under `/var/lib/ai-platform`); any `AI_PLATFORM_*` variable overrides it —
 e.g. point `AI_PLATFORM_DATA_DIR`, `AI_PLATFORM_WORKSPACE_ROOT`,
@@ -319,12 +419,14 @@ backend at build time. Port 8000 belongs to another service on this VPS.
 src/ai_platform/application.py     shared composition for CLI and API (+ injectable executor)
 src/ai_platform/sessions.py        TaskSessionService: continue_conversation(), human_message_event()
 src/ai_platform/conversation.py    ConversationService: submit/list, acceptance rules, idempotency
+src/ai_platform/controls.py        TaskControlService: availability, controls, action idempotency
 src/ai_platform/runner.py          TaskTurnRunner: durable FIFO claims, one turn per task at a time
 src/ai_platform/storage.py         + message_queue table and atomic queue operations
 src/ai_platform/api/presenters.py  metadata allowlist + PathRedactor + response builders
 src/ai_platform/api/routes/        health, config, tasks, messages, stream
 web/src/api/useTaskStream.ts       EventSource lifecycle, cursor, watchdog reconnect
 web/src/components/ChatPanel.tsx   conversation + composer
+web/src/components/TaskControls.tsx lifecycle buttons, dialogs, feedback
 ```
 
 ## Quality checks
@@ -342,21 +444,27 @@ idempotency (no duplicate event or turn), the blocking concurrency/FIFO scenario
 (A RUNNING, B/C QUEUED, one writer), restart durability, failure handling,
 interrupted turns, the unchanged CLI path, redaction, non-mutating GETs, and SSE
 ordering/leak-freedom/`Last-Event-ID` resume/heartbeats over a real uvicorn
-server.
+server. `tests/test_controls.py` covers every control's happy and invalid paths,
+async start/resume, idempotent retries, parallel start/resume clicks (one turn),
+chat-during-start, cooperative pause, approve refused mid-turn or with queued
+chat, reject as a correction turn, reset confirmation/semantics, availability
+per state, disabled controls without actor/runner, lock-detail redaction, and a
+full start → chat → pause → resume → approve loop.
 
-## Current limitations (still CLI-only)
+## Current limitations
 
-- start, pause, resume, approve, reject, reset, human shell, `attach --follow`;
-- a task must have been started (and not be paused/completed/failed) to chat;
-- agent text arrives when the SDK turn ends (Demo 1 persists activities after
-  the call), not token by token; live progress comes from platform events;
+- **Still CLI/SSH-only:** human shell (`ai-platform shell`), `attach --follow`,
+  `doctor`; no browser terminal, filesystem editor or command execution.
 - single web actor, no authentication; loopback + SSH tunnel only;
-- one runner-enabled API process per runtime.
+- one runner-enabled API process per runtime; control requests are serialized
+  per task within that process (CLI users can still race each other exactly as
+  in Demo 1 — the writer lock keeps that safe);
+- agent text arrives when the SDK turn ends, not token by token;
+- start/resume/reject need `AI_PLATFORM_ENABLE_RUNNER=1`.
 
-## Future / Phase 3+
+## Future / Phase 4+
 
-- Browser task controls (start/pause/resume/approve/reject/reset) — Phase 3.
-- Authentication, multi-user identity, authorization — Phase 4.
+- Authentication, multi-user identity, per-user attribution, authorization — Phase 4.
 - Browser terminal / human shell — Phase 5.
 - Persist agent activity incrementally during a turn (live tool activity).
 - Optional stream of public assistant text if the SDK allows it without

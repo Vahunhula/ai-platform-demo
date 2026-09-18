@@ -34,6 +34,16 @@ export interface MessagingState {
   reason: string | null;
 }
 
+export type ControlAction = "start" | "pause" | "resume" | "approve" | "reject" | "reset";
+
+/** Decided by the backend; the UI only renders it. */
+export interface ActionState {
+  allowed: boolean;
+  reason: string | null;
+}
+
+export type TaskActions = Record<ControlAction, ActionState>;
+
 export interface TaskDetail extends TaskListItem {
   description: string;
   acceptance_criteria: string[];
@@ -43,8 +53,10 @@ export interface TaskDetail extends TaskListItem {
   verification_status: string;
   verification_result: VerificationResult | null;
   agent_working: boolean;
+  pause_requested: boolean;
   queued_messages: number;
   messaging: MessagingState;
+  actions: TaskActions;
   created_at: string;
 }
 
@@ -94,4 +106,25 @@ export interface PostMessageResponse {
   task_id: string;
   message_status: MessageStatus;
   duplicate: boolean;
+}
+
+/** Bodies accepted by the control endpoints; never an actor, command or path. */
+export type ControlRequest =
+  | { action: "start"; client_action_id: string }
+  | { action: "resume"; client_action_id: string; message?: string | null }
+  | { action: "reject"; client_action_id: string; message: string }
+  | { action: "pause" }
+  | { action: "approve" }
+  | { action: "reset"; confirm: true };
+
+export interface ControlResponse {
+  /** "accepted": an agent turn was launched in the background. "completed": done. */
+  status: "accepted" | "completed";
+  action: ControlAction;
+  task_id: string;
+  task_status: string;
+  execution_id: string | null;
+  client_action_id: string | null;
+  duplicate: boolean;
+  deferred: boolean | null;
 }

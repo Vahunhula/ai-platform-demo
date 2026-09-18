@@ -720,3 +720,201 @@ details summary {
   background: #9fb3a8;
   cursor: not-allowed;
 }
+
+/* ---- Phase 3: lifecycle controls ---- */
+
+.task-state {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px 24px;
+  margin: -6px 0 22px;
+}
+
+.state-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 11px;
+  color: #45524c;
+  background: #fff;
+  border: 1px solid #d5ddd7;
+  border-radius: 999px;
+  font-size: 12px;
+}
+
+.chip-working {
+  color: #1d6645;
+  background: #e5f3eb;
+  border-color: #b9dcc8;
+  font-weight: 700;
+}
+
+.chip-warn {
+  color: #6d5a1c;
+  background: #f6ecc8;
+  border-color: #e6d69a;
+  font-weight: 700;
+}
+
+.controls {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.control-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.control {
+  padding: 8px 16px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.control:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.control.primary {
+  color: #fff;
+  background: #1d6645;
+}
+
+.control.secondary {
+  color: #2e3b35;
+  background: #fff;
+  border-color: #c9d3cc;
+}
+
+.control.danger {
+  color: #fff;
+  background: #a33a35;
+}
+
+.control.danger-outline {
+  color: #a33a35;
+  background: #fff;
+  border-color: #e3b5b1;
+}
+
+.why {
+  color: #748078;
+  font-size: 12px;
+}
+
+.why summary {
+  margin: 0;
+  color: #748078;
+}
+
+.why ul {
+  position: absolute;
+  z-index: 5;
+  max-width: 420px;
+  margin: 6px 0 0 -300px;
+  padding: 10px 14px 10px 28px;
+  background: #fff;
+  border: 1px solid #d5ddd7;
+  border-radius: 7px;
+  box-shadow: 0 8px 24px rgba(37, 55, 46, 0.12);
+  line-height: 1.5;
+}
+
+.control-feedback {
+  max-width: 520px;
+  padding: 7px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+.control-feedback.info {
+  color: #1d6645;
+  background: #e5f3eb;
+}
+
+.control-feedback.error {
+  color: #8b312e;
+  background: #f8dfdc;
+}
+
+.control-feedback .link-button {
+  margin-left: 8px;
+}
+
+.dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  background: rgba(17, 26, 23, 0.45);
+}
+
+.dialog {
+  width: min(520px, calc(100vw - 32px));
+  padding: 22px 24px 18px;
+  background: #fff;
+  border-radius: 10px;
+  box-shadow: 0 20px 60px rgba(17, 26, 23, 0.3);
+}
+
+.dialog h3 {
+  margin: 0 0 12px;
+  font-size: 18px;
+}
+
+.dialog-body {
+  color: #3c4943;
+  font-size: 14px;
+  line-height: 1.55;
+}
+
+.dialog-body p {
+  margin: 0 0 10px;
+}
+
+.dialog-body ul {
+  margin: 0 0 10px;
+  padding-left: 20px;
+}
+
+.dialog-label {
+  display: block;
+  margin: 6px 0 5px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.dialog-body textarea {
+  width: 100%;
+  padding: 9px 11px;
+  border: 1px solid #c9d3cc;
+  border-radius: 6px;
+  font: inherit;
+  resize: vertical;
+}
+
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 16px;
+}

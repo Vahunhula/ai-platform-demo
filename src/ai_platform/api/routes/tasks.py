@@ -4,6 +4,7 @@ from fastapi import APIRouter
 
 from ai_platform.api.dependencies import (
     ContextDependency,
+    ControlsDependency,
     ConversationDependency,
     PresenterDependency,
 )
@@ -29,11 +30,13 @@ def get_task(
     task_id: str,
     context: ContextDependency,
     conversation: ConversationDependency,
+    controls: ControlsDependency,
     presenter: PresenterDependency,
 ) -> TaskDetailResponse:
     session = context.sessions.get_session(task_id)
     queued = queued_count(context.storage.list_queued_messages(session.definition.id))
-    return presenter.task_detail(session, conversation, queued)
+    actions = controls.availability(session.record)
+    return presenter.task_detail(session, conversation, queued, actions)
 
 
 @router.get("/{task_id}/events", response_model=list[EventResponse])
