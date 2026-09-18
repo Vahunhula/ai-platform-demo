@@ -444,7 +444,7 @@ current name, else the actor ID) next to the unchanged `actor_id`.
 | --- | --- |
 | `<workspace root>/<TASK-ID>…` | `<task-workspace>…` |
 | workspace root | `<workspace-root>` |
-| platform data directory (`/var/lib/ai-platform`) | `<platform-data>` |
+| platform data directory (e.g. `/var/lib/ai-platform-demo2`) | `<platform-data>` |
 | platform source checkout | `<platform-root>` |
 
 Only those configured prefixes are replaced (whole path components); relative
@@ -519,9 +519,37 @@ shell, terminal, filesystem or command endpoint.
 
 ## Run on the Demo VPS
 
-Demo 2 lives in the worktree `/root/ai-platform-demo-demo2` (branch
-`demo2-phase4`). `/opt/ai-platform-demo`, its `/usr/local/bin/ai-platform`
-wrapper, and the `demo-1` tag are untouched.
+Demo 2 lives in the worktree `/root/ai-platform-demo-demo2`. `/opt/ai-platform-demo`,
+its `/usr/local/bin/ai-platform` wrapper, and the `demo-1` tag are untouched.
+
+**Two runtimes, never mixed:**
+
+```text
+/var/lib/ai-platform         Demo 1 — FROZEN (used only by /usr/local/bin/ai-platform)
+/var/lib/ai-platform-demo2   Demo 2 — users, auth, resets, showcase (this checkout)
+```
+
+`/var/lib/ai-platform-demo2` was created once as an exact `cp -a` copy of the
+Demo 1 runtime (same owners, `ai-platform` group, setgid directories and
+modes; identical history), then initialized with the Phase 4 schema. Everything
+Demo 2 does from now on happens there.
+
+**Runtime helper.** `scripts/demo2-env.sh` sets the four runtime paths (plus the
+task file and demo repository of this checkout) to the Demo 2 runtime. Variables
+that are already set win, so a copied test runtime can still be used, but any
+path inside `/var/lib/ai-platform` is **refused** unless
+`AI_PLATFORM_ALLOW_DEMO1_RUNTIME=1` is set deliberately. Source it before every
+manual CLI command from this checkout:
+
+```sh
+cd /root/ai-platform-demo-demo2
+. scripts/demo2-env.sh        # prints: demo2-env: runtime /var/lib/ai-platform-demo2 …
+.venv/bin/ai-platform users list
+```
+
+Without it, a manual `.venv/bin/ai-platform` call uses the repository-relative
+`data/` defaults (never Demo 1). The launcher sources the same helper, so it can
+no longer fall back to `/var/lib/ai-platform`.
 
 One-time setup:
 
@@ -531,22 +559,20 @@ cd /root/ai-platform-demo-demo2
 cd web && npm install
 ```
 
-Provision users against the runtime the API will use (same `AI_PLATFORM_*`
-paths as the launcher; shown for the shared runtime):
+Users (already provisioned on the Demo 2 runtime: `vakho`, `alex`, `an`, all
+developers). Tokens are created by an administrator and handed to their owner
+privately — each is printed once:
 
 ```sh
 cd /root/ai-platform-demo-demo2
-export AI_PLATFORM_DATA_DIR=/var/lib/ai-platform \
-       AI_PLATFORM_WORKSPACE_ROOT=/var/lib/ai-platform/workspaces \
-       AI_PLATFORM_DB_PATH=/var/lib/ai-platform/platform.db \
-       AI_PLATFORM_CHECKPOINT_DB_PATH=/var/lib/ai-platform/langgraph-checkpoints.db
-.venv/bin/ai-platform users add --username vakho --display-name "Vakho" --role developer
-.venv/bin/ai-platform users add --username alex  --display-name "Alex"  --role developer
-.venv/bin/ai-platform users add --username an    --display-name "An"    --role developer
-.venv/bin/ai-platform auth-token create vakho    # hand each person their token privately
+. scripts/demo2-env.sh
+.venv/bin/ai-platform auth-token create vakho
+.venv/bin/ai-platform auth-token create alex
+.venv/bin/ai-platform auth-token create an
+# more users: .venv/bin/ai-platform users add --username NAME --display-name "Name" --role developer
 ```
 
-Terminal A — API (loopback only, port 8765):
+Terminal A — API (loopback only, port 8765, Demo 2 runtime by default):
 
 ```sh
 cd /root/ai-platform-demo-demo2
@@ -565,15 +591,18 @@ Workstation (each developer):
 ```sh
 ssh -L 5173:127.0.0.1:5173 root@<vps>
 # open http://localhost:5173 and sign in with username + access token
+# (a second identity: use a private/incognito window)
 ```
 
-Opening a runtime with Phase 4 code adds `users`, `auth_tokens`, `web_sessions`
-and `task_presence`, and creates or migrates `message_queue` — all additive; the
-frozen Demo 1 CLI keeps working on such a database (verified). To experiment
-safely, point the `AI_PLATFORM_*` paths at a copied runtime. A second API
-process (e.g. `AI_PLATFORM_API_PORT=8766 ./scripts/serve_api_dev.sh`) can share
-the runtime, with or without its own runner. Even with authentication, keep the
-API on 127.0.0.1 behind the SSH tunnel — this is not a public deployment.
+Phase 4 code adds `users`, `auth_tokens`, `web_sessions` and `task_presence`
+and creates or migrates `message_queue` in the runtime it opens — additive, and
+the frozen Demo 1 CLI still works on such a database (verified), but this is why
+Demo 2 never opens the Demo 1 runtime. To experiment without touching the
+showcase runtime, point `AI_PLATFORM_DATA_DIR` (and the three other paths) at a
+copy. A second API process (e.g. `AI_PLATFORM_API_PORT=8766
+./scripts/serve_api_dev.sh`) can share the runtime, with or without its own
+runner. Even with authentication, keep the API on 127.0.0.1 behind the SSH
+tunnel — this is not a public deployment.
 
 Vite proxies `/api/*` (including SSE) to `http://127.0.0.1:8765` (override with
 `AI_PLATFORM_API_PROXY`) and **preserves the browser's `Host`**, which the
