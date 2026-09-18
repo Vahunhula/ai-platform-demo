@@ -4,6 +4,10 @@ AI Platform Demo is a proof of concept for a shared, persistent, task-owned AI
 software-development workflow. Phase 5 deploys the Phase 4 orchestration and
 recovery design as a hosted multi-user SSH demonstration.
 
+Demo 2 Phase 1 adds a read-only FastAPI interface and React/TypeScript product
+shell without replacing that core. See [docs/demo2-ui.md](docs/demo2-ui.md) for
+architecture, API contracts, development commands, and current limitations.
+
 The central rule is:
 
 ```text

@@ -1,7 +1,6 @@
 """Thin Typer/Rich client for the shared TaskSession application service."""
 
 import json
-from dataclasses import dataclass
 from pathlib import Path
 
 import typer
@@ -11,62 +10,23 @@ from rich.panel import Panel
 from rich.syntax import Syntax
 from rich.table import Table
 
+from ai_platform.application import ApplicationContext, create_application_context
 from ai_platform.approval import ApprovalError
 from ai_platform.config import Settings
 from ai_platform.doctor import CheckStatus, inspect_environment
-from ai_platform.events import ActorType, Event, EventType
-from ai_platform.executors import AgentExecutor, ClaudeAgentExecutor
+from ai_platform.events import ActorType, Event
 from ai_platform.identity import HumanIdentity, LocalIdentityProvider
 from ai_platform.locks import ExecutionLockManager
 from ai_platform.models import TaskDefinition
-from ai_platform.router import ModelRouter
-from ai_platform.sessions import TaskSession, TaskSessionError, TaskSessionService, TurnOutcome
-from ai_platform.storage import SQLiteStorage
-from ai_platform.task_loader import get_task, load_tasks
-from ai_platform.workspace import LocalWorkspaceProvider, WorkspaceError
+from ai_platform.sessions import TaskSession, TaskSessionError, TurnOutcome
+from ai_platform.workspace import WorkspaceError
 
 app = typer.Typer(no_args_is_help=True, help="AI Platform Demo CLI")
 console = Console()
 
 
-@dataclass(slots=True)
-class ApplicationContext:
-    settings: Settings
-    definitions: list[TaskDefinition]
-    storage: SQLiteStorage
-    workspaces: LocalWorkspaceProvider
-    sessions: TaskSessionService
-
-
 def _application_context() -> ApplicationContext:
-    settings = Settings.from_env()
-    definitions = load_tasks(settings.tasks_path)
-    storage = SQLiteStorage(settings.db_path)
-    storage.initialize()
-    for definition in definitions:
-        if storage.create_task(definition):
-            storage.append_event(
-                Event(
-                    task_id=definition.id,
-                    event_type=EventType.TASK_CREATED,
-                    actor_type=ActorType.SYSTEM,
-                    actor_id="task-loader",
-                    metadata={"title": definition.title},
-                )
-            )
-    workspaces = LocalWorkspaceProvider(settings.workspace_root, settings.demo_repository)
-    sessions = TaskSessionService(
-        settings,
-        definitions,
-        storage,
-        workspaces,
-        ModelRouter.from_settings(settings),
-        lambda: _executor(settings),
-    )
-    sessions.recover_stale_locks(
-        recovered_by=f"cli-startup@{sessions.locks.hostname}:{sessions.locks.process_id}"
-    )
-    return ApplicationContext(settings, definitions, storage, workspaces, sessions)
+    return create_application_context(lock_recovery_client="cli-startup")
 
 
 @app.command()
@@ -97,10 +57,9 @@ def doctor() -> None:
 
 def _definition_or_exit(context: ApplicationContext, task_id: str) -> TaskDefinition:
     try:
-        return get_task(context.definitions, task_id)
-    except KeyError:
-        console.print(f"[red]Unknown task ID:[/red] {escape(task_id)}")
-        raise typer.Exit(code=1) from None
+        return context.sessions.get_definition(task_id)
+    except TaskSessionError as error:
+        _exit_with_error(error)
 
 
 def _identity_or_exit() -> HumanIdentity:
@@ -109,14 +68,6 @@ def _identity_or_exit() -> HumanIdentity:
     except ValueError as error:
         console.print(f"[red]Identity error:[/red] {escape(str(error))}")
         raise typer.Exit(code=1) from None
-
-
-def _executor(settings: Settings) -> AgentExecutor:
-    if settings.executor.lower() == "claude":
-        return ClaudeAgentExecutor(settings)
-    raise TaskSessionError(
-        f"Unsupported executor: {settings.executor}. Set AI_PLATFORM_EXECUTOR=claude."
-    )
 
 
 @app.command("tasks")
@@ -130,7 +81,7 @@ def list_task_command() -> None:
     table.add_column("STATUS")
     table.add_column("WRITER")
     table.add_column("TITLE")
-    for task in context.storage.list_tasks():
+    for task in context.sessions.list_tasks():
         table.add_row(
             task.task_id,
             task.difficulty.value.upper(),
@@ -214,14 +165,15 @@ def diff_command(task_id: str) -> None:
     """Show the actual Git diff in a task workspace."""
 
     context = _application_context()
-    task = _definition_or_exit(context, task_id)
-    if not context.workspaces.exists(task.id):
+    try:
+        task = context.sessions.get_definition(task_id)
+        workspace_exists = context.workspaces.exists(task.id)
+        diff_text = context.sessions.get_diff(task.id)
+    except (TaskSessionError, WorkspaceError) as error:
+        _exit_with_error(error)
+    if not workspace_exists:
         console.print(f"No workspace exists for {task.id}.")
         return
-    try:
-        diff_text = context.workspaces.get_diff(task.id)
-    except WorkspaceError as error:
-        _exit_with_error(error)
     console.print(f"[bold cyan]{task.id} - Current Diff[/bold cyan]\n")
     if not diff_text.strip():
         console.print("Workspace is clean.")
@@ -234,8 +186,11 @@ def trace(task_id: str) -> None:
     """Print the complete normalized, append-only TaskSession history."""
 
     context = _application_context()
-    task = _definition_or_exit(context, task_id)
-    events = context.storage.get_events(task.id)
+    try:
+        task = context.sessions.get_definition(task_id)
+        events = context.sessions.get_events(task.id)
+    except TaskSessionError as error:
+        _exit_with_error(error)
     table = Table(title=f"{task.id} - Trace", show_header=True, header_style="bold cyan")
     table.add_column("SEQ", justify="right")
     table.add_column("TIME (UTC)", no_wrap=True)
@@ -253,6 +208,18 @@ def trace(task_id: str) -> None:
             _format_metadata(event.metadata, 500),
         )
     console.print(table)
+
+
+@app.command()
+def serve(
+    host: str = typer.Option("127.0.0.1", help="HTTP bind address"),
+    port: int = typer.Option(8765, min=1, max=65535, help="HTTP port"),
+) -> None:
+    """Serve the read-only Phase 1 HTTP API (loopback only by default)."""
+
+    import uvicorn
+
+    uvicorn.run("ai_platform.api.app:app", host=host, port=port)
 
 
 @app.command()

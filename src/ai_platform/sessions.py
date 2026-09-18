@@ -29,6 +29,10 @@ class TaskSessionError(RuntimeError):
     """A safe collaboration or lifecycle error suitable for a client."""
 
 
+class TaskNotFoundError(TaskSessionError):
+    """The requested task ID has no definition or no persisted runtime state."""
+
+
 @dataclass(frozen=True, slots=True)
 class TaskSession:
     """The durable task definition, runtime state, workspace, and shared history."""
@@ -112,6 +116,32 @@ class TaskSessionService:
             events=self.storage.get_events(definition.id),
             changed_files=changed_files,
         )
+
+    def list_tasks(self) -> list[TaskRecord]:
+        """Return current persisted task records in stable task-ID order."""
+
+        return self.storage.list_tasks()
+
+    def get_definition(self, task_id: str) -> TaskDefinition:
+        """Return a validated task definition through the application service."""
+
+        return self._definition(task_id)
+
+    def get_events(self, task_id: str) -> list[Event]:
+        """Return one task's durable event stream in sequence order."""
+
+        task = self._definition(task_id)
+        self._record(task.id)
+        return self.storage.get_events(task.id)
+
+    def get_diff(self, task_id: str) -> str:
+        """Return the task workspace diff, or an empty diff before workspace creation."""
+
+        task = self._definition(task_id)
+        self._record(task.id)
+        if not self.workspaces.exists(task.id):
+            return ""
+        return self.workspaces.get_diff(task.id)
 
     def connect(self, task_id: str, human: HumanIdentity) -> Event:
         """Record that a human attached; this does not imply live presence."""
@@ -552,12 +582,12 @@ class TaskSessionService:
         try:
             return get_task(self.definitions, task_id)
         except KeyError as error:
-            raise TaskSessionError(f"Unknown task ID: {task_id}") from error
+            raise TaskNotFoundError(f"Unknown task ID: {task_id}") from error
 
     def _record(self, task_id: str) -> TaskRecord:
         record = self.storage.get_task(task_id)
         if record is None:
-            raise TaskSessionError(f"No runtime state exists for {task_id}")
+            raise TaskNotFoundError(f"No runtime state exists for {task_id}")
         return record
 
     def recover_stale_locks(self, *, recovered_by: str) -> list[str]:

@@ -10,12 +10,14 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "claude-agent-sdk",
+    "fastapi>=0.115,<0.120",
     "langgraph",
     "langgraph-checkpoint-sqlite",
     "pydantic>=2",
     "python-dotenv",
     "rich",
     "typer",
+    "uvicorn>=0.34",
 ]
 
 [project.optional-dependencies]

@@ -20,3 +20,8 @@ workspaces/
 .claude/
 .DS_Store
 Thumbs.db
+
+# Web frontend
+web/node_modules/
+web/dist/
+*.tsbuildinfo
