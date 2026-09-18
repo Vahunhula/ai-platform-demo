@@ -71,7 +71,9 @@ async def test_task_listing_and_known_detail(
 
     assert listing.status_code == 200
     assert [task["id"] for task in listing.json()] == ["DEMO-1", "DEMO-2", "DEMO-3"]
-    assert listing.json()[0] == {
+    first = listing.json()[0]
+    assert first.pop("updated_at")
+    assert first == {
         "id": "DEMO-1",
         "title": "Fix welcome typo",
         "difficulty": "LOW",
@@ -235,12 +237,13 @@ def test_api_context_does_not_recover_locks(
     assert calls[0].startswith("cli-startup@")
 
 
-def test_api_routes_are_read_only() -> None:
-    methods = {
-        method
+def test_only_mutation_route_is_posting_a_message() -> None:
+    mutations = {
+        (route.path, method)
         for route in create_app().routes
         if getattr(route, "path", "").startswith("/api")
         for method in getattr(route, "methods", set())
+        if method not in {"GET", "HEAD"}
     }
 
-    assert methods <= {"GET", "HEAD"}
+    assert mutations == {("/api/tasks/{task_id}/messages", "POST")}

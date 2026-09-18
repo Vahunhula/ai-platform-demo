@@ -23,6 +23,7 @@ from ai_platform.task_loader import get_task
 from ai_platform.workspace import FileChange, LocalWorkspaceProvider
 
 _CONTEXT_EVENT_LIMIT = 12
+MAX_MESSAGE_LENGTH = 8000
 
 
 class TaskSessionError(RuntimeError):
@@ -187,13 +188,32 @@ class TaskSessionService:
         """Append a shared instruction immediately and continue a review-state task."""
 
         task = self._definition(task_id)
-        content = self._validate_message(message)
+        content = self.validate_message(message)
         self._append_human_event(
             task.id,
             EventType.HUMAN_MESSAGE,
             human,
             {"message": content},
         )
+        return self.continue_conversation(task.id, human)
+
+    def continue_conversation(
+        self,
+        task_id: str,
+        human: HumanIdentity,
+        *,
+        execution_id: str | None = None,
+        through_sequence_id: int | None = None,
+    ) -> TurnOutcome:
+        """Run the next agent turn for already-recorded human messages when state permits.
+
+        This is the single message-continuation path shared by the CLI (``message``)
+        and the browser message runner. ``through_sequence_id`` limits the human
+        instructions in the turn context to messages recorded up to that event, so a
+        queued browser message is answered in its own FIFO turn.
+        """
+
+        task = self._definition(task_id)
         record = self._record(task.id)
         if record.status is TaskStatus.PAUSED_BY_HUMAN:
             return TurnOutcome(
@@ -212,7 +232,30 @@ class TaskSessionService:
                     else f"Message recorded; {task.id} is {record.status.value.upper()}."
                 ),
             )
-        return self._try_continuation(task, human, {TaskStatus.WAITING_FOR_HUMAN})
+        return self._try_continuation(
+            task,
+            human,
+            {TaskStatus.WAITING_FOR_HUMAN},
+            execution_id=execution_id,
+            through_sequence_id=through_sequence_id,
+        )
+
+    def human_message_event(
+        self,
+        task_id: str,
+        content: str,
+        human: HumanIdentity,
+        metadata: dict | None = None,
+    ) -> Event:
+        """Build (without persisting) the canonical HUMAN_MESSAGE event for a task."""
+
+        task = self._definition(task_id)
+        return self._human_event(
+            task.id,
+            EventType.HUMAN_MESSAGE,
+            human,
+            {"message": self.validate_message(content), **(metadata or {})},
+        )
 
     def pause(self, task_id: str, human: HumanIdentity) -> bool:
         """Pause immediately or request cooperative cancellation of a live agent turn."""
@@ -449,9 +492,12 @@ class TaskSessionService:
         task: TaskDefinition,
         human: HumanIdentity,
         allowed_statuses: set[TaskStatus],
+        *,
+        execution_id: str | None = None,
+        through_sequence_id: int | None = None,
     ) -> TurnOutcome:
         executor = self._preflight_executor()
-        execution_id = str(uuid4())
+        execution_id = execution_id or str(uuid4())
         lock = self.locks.acquire(
             task.id,
             ExecutionKind.AGENT,
@@ -478,6 +524,7 @@ class TaskSessionService:
             execution_id,
             executor,
             continuation=True,
+            through_sequence_id=through_sequence_id,
         )
         return TurnOutcome(agent_started=True, state=state)
 
@@ -490,8 +537,11 @@ class TaskSessionService:
         executor: AgentExecutor,
         *,
         continuation: bool,
+        through_sequence_id: int | None = None,
     ) -> TaskGraphState:
-        human_messages, agent_messages = self._current_conversation_context(task.id)
+        human_messages, agent_messages = self._current_conversation_context(
+            task.id, through_sequence_id
+        )
         human_workspace_changed = self._human_changed_workspace_since_last_agent(task.id)
         try:
             with self.locks.heartbeat(task.id, owner):
@@ -541,16 +591,39 @@ class TaskSessionService:
             if pause_transition:
                 self._append_status_change(task.id, *pause_transition)
 
-    def _current_conversation_context(self, task_id: str) -> tuple[list[str], list[str]]:
-        events = self.storage.get_recent_events(
-            task_id,
-            {
-                EventType.HUMAN_MESSAGE,
-                EventType.AGENT_MESSAGE,
-                EventType.AGENT_COMPLETED,
-            },
-            limit=_CONTEXT_EVENT_LIMIT,
-        )
+    def _current_conversation_context(
+        self,
+        task_id: str,
+        through_sequence_id: int | None = None,
+    ) -> tuple[list[str], list[str]]:
+        if through_sequence_id is None:
+            events = self.storage.get_recent_events(
+                task_id,
+                {
+                    EventType.HUMAN_MESSAGE,
+                    EventType.AGENT_MESSAGE,
+                    EventType.AGENT_COMPLETED,
+                },
+                limit=_CONTEXT_EVENT_LIMIT,
+            )
+        else:
+            # Human instructions stop at the queued message; agent replies do not.
+            events = sorted(
+                [
+                    *self.storage.get_recent_events(
+                        task_id,
+                        {EventType.HUMAN_MESSAGE},
+                        limit=_CONTEXT_EVENT_LIMIT,
+                        through_sequence_id=through_sequence_id,
+                    ),
+                    *self.storage.get_recent_events(
+                        task_id,
+                        {EventType.AGENT_MESSAGE, EventType.AGENT_COMPLETED},
+                        limit=_CONTEXT_EVENT_LIMIT,
+                    ),
+                ],
+                key=lambda event: event.sequence_id or 0,
+            )
         humans: list[str] = []
         agents: list[str] = []
         for event in events:
@@ -602,15 +675,22 @@ class TaskSessionService:
         human: HumanIdentity,
         metadata: dict | None = None,
     ) -> Event:
+        return self.storage.append_event(self._human_event(task_id, event_type, human, metadata))
+
+    @staticmethod
+    def _human_event(
+        task_id: str,
+        event_type: EventType,
+        human: HumanIdentity,
+        metadata: dict | None = None,
+    ) -> Event:
         details = {"display_name": human.display_name, **(metadata or {})}
-        return self.storage.append_event(
-            Event(
-                task_id=task_id,
-                event_type=event_type,
-                actor_type=ActorType.HUMAN,
-                actor_id=human.actor_id,
-                metadata=details,
-            )
+        return Event(
+            task_id=task_id,
+            event_type=event_type,
+            actor_type=ActorType.HUMAN,
+            actor_id=human.actor_id,
+            metadata=details,
         )
 
     def _append_status_change(
@@ -663,13 +743,19 @@ class TaskSessionService:
         )
 
     @staticmethod
-    def _validate_message(message: str) -> str:
+    def validate_message(message: str) -> str:
+        """Normalize one human instruction or raise a client-safe error."""
+
         content = message.strip()
         if not content:
             raise TaskSessionError("Message must not be empty")
-        if len(content) > 8000:
-            raise TaskSessionError("Message must be 8000 characters or fewer")
+        if len(content) > MAX_MESSAGE_LENGTH:
+            raise TaskSessionError(
+                f"Message must be {MAX_MESSAGE_LENGTH} characters or fewer"
+            )
         return content
+
+    _validate_message = validate_message
 
     @staticmethod
     def _run_interactive_shell(workspace: Path) -> int:

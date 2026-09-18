@@ -13,7 +13,9 @@ from time import monotonic, sleep
 from ai_platform.events import ActorType, Event, EventType
 from ai_platform.models import (
     ExecutionKind,
+    MessageStatus,
     ModelSelection,
+    QueuedMessage,
     TaskDefinition,
     TaskRecord,
     TaskStatus,
@@ -138,6 +140,34 @@ class SQLiteStorage:
                 BEGIN
                     SELECT RAISE(ABORT, 'events are append-only');
                 END
+                """
+            )
+            # Demo 2: delivery state for browser messages. Message content is never
+            # stored here; it is the referenced HUMAN_MESSAGE event.
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS message_queue (
+                    message_id TEXT PRIMARY KEY,
+                    task_id TEXT NOT NULL,
+                    client_message_id TEXT NOT NULL,
+                    event_sequence_id INTEGER NOT NULL UNIQUE,
+                    actor_id TEXT NOT NULL,
+                    display_name TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    execution_id TEXT,
+                    error TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE (task_id, client_message_id),
+                    FOREIGN KEY (task_id) REFERENCES tasks(task_id),
+                    FOREIGN KEY (event_sequence_id) REFERENCES events(sequence_id)
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_message_queue_task_status
+                ON message_queue(task_id, status, event_sequence_id)
                 """
             )
 
@@ -283,6 +313,7 @@ class SQLiteStorage:
         event_types: Iterable[EventType],
         *,
         limit: int,
+        through_sequence_id: int | None = None,
     ) -> list[Event]:
         """Return a bounded chronological slice for current agent context."""
 
@@ -290,17 +321,19 @@ class SQLiteStorage:
         if not values or limit < 1:
             return []
         placeholders = ", ".join("?" for _ in values)
+        cutoff = "" if through_sequence_id is None else "AND sequence_id <= ?"
+        cutoff_args = () if through_sequence_id is None else (through_sequence_id,)
         with self._connect() as connection:
             rows = connection.execute(
                 f"""
                 SELECT sequence_id, id, task_id, timestamp, event_type,
                        actor_type, actor_id, metadata_json
                 FROM events
-                WHERE task_id = ? AND event_type IN ({placeholders})
+                WHERE task_id = ? AND event_type IN ({placeholders}) {cutoff}
                 ORDER BY sequence_id DESC
                 LIMIT ?
                 """,
-                (task_id, *values, limit),
+                (task_id, *values, *cutoff_args, limit),
             ).fetchall()
         return [self._event_from_row(row) for row in reversed(rows)]
 
@@ -522,6 +555,202 @@ class SQLiteStorage:
             )
             return cursor.rowcount == 1
 
+    def get_event(self, task_id: str, sequence_id: int) -> Event | None:
+        """Return one event of a task by its durable sequence number."""
+
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT sequence_id, id, task_id, timestamp, event_type,
+                       actor_type, actor_id, metadata_json
+                FROM events WHERE task_id = ? AND sequence_id = ?
+                """,
+                (task_id, sequence_id),
+            ).fetchone()
+        return self._event_from_row(row) if row else None
+
+    def enqueue_message(
+        self,
+        event: Event,
+        *,
+        message_id: str,
+        client_message_id: str,
+        display_name: str,
+    ) -> tuple[QueuedMessage, bool]:
+        """Append a HUMAN_MESSAGE and its queue entry atomically, once per client key.
+
+        Returns the stored entry and whether this call created it. A retried request
+        with the same (task_id, client_message_id) returns the original entry and
+        appends nothing.
+        """
+
+        with self._connect(immediate=True) as connection:
+            existing = connection.execute(
+                "SELECT * FROM message_queue WHERE task_id = ? AND client_message_id = ?",
+                (event.task_id, client_message_id),
+            ).fetchone()
+            if existing is not None:
+                return self._queued_message_from_row(existing), False
+            self._insert_event(connection, event)
+            now = datetime.now(UTC).isoformat()
+            connection.execute(
+                """
+                INSERT INTO message_queue (
+                    message_id, task_id, client_message_id, event_sequence_id, actor_id,
+                    display_name, status, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    message_id,
+                    event.task_id,
+                    client_message_id,
+                    event.sequence_id,
+                    event.actor_id,
+                    display_name,
+                    MessageStatus.QUEUED.value,
+                    now,
+                    now,
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM message_queue WHERE message_id = ?", (message_id,)
+            ).fetchone()
+        return self._queued_message_from_row(row), True
+
+    def get_queued_message(self, task_id: str, client_message_id: str) -> QueuedMessage | None:
+        """Return the delivery record for one idempotency key, if it exists."""
+
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM message_queue WHERE task_id = ? AND client_message_id = ?",
+                (task_id, client_message_id),
+            ).fetchone()
+        return self._queued_message_from_row(row) if row else None
+
+    def list_queued_messages(self, task_id: str) -> list[QueuedMessage]:
+        """Return every browser message delivery record for a task in FIFO order."""
+
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM message_queue WHERE task_id = ? ORDER BY event_sequence_id",
+                (task_id,),
+            ).fetchall()
+        return [self._queued_message_from_row(row) for row in rows]
+
+    def tasks_with_queued_messages(self) -> list[str]:
+        """Return task IDs that have at least one QUEUED message."""
+
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT DISTINCT task_id FROM message_queue WHERE status = ? ORDER BY task_id",
+                (MessageStatus.QUEUED.value,),
+            ).fetchall()
+        return [row["task_id"] for row in rows]
+
+    def running_messages(self) -> list[QueuedMessage]:
+        """Return messages whose agent turn is marked as running."""
+
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM message_queue WHERE status = ? ORDER BY event_sequence_id",
+                (MessageStatus.RUNNING.value,),
+            ).fetchall()
+        return [self._queued_message_from_row(row) for row in rows]
+
+    def claim_next_message(self, task_id: str, execution_id: str) -> QueuedMessage | None:
+        """Atomically mark the oldest QUEUED message RUNNING if none is running for the task."""
+
+        now = datetime.now(UTC).isoformat()
+        with self._connect(immediate=True) as connection:
+            cursor = connection.execute(
+                """
+                UPDATE message_queue
+                SET status = ?, execution_id = ?, error = NULL, updated_at = ?
+                WHERE message_id = (
+                    SELECT message_id FROM message_queue
+                    WHERE task_id = ? AND status = ?
+                    ORDER BY event_sequence_id LIMIT 1
+                )
+                AND NOT EXISTS (
+                    SELECT 1 FROM message_queue WHERE task_id = ? AND status = ?
+                )
+                """,
+                (
+                    MessageStatus.RUNNING.value,
+                    execution_id,
+                    now,
+                    task_id,
+                    MessageStatus.QUEUED.value,
+                    task_id,
+                    MessageStatus.RUNNING.value,
+                ),
+            )
+            if cursor.rowcount != 1:
+                return None
+            row = connection.execute(
+                "SELECT * FROM message_queue WHERE task_id = ? AND execution_id = ? AND status = ?",
+                (task_id, execution_id, MessageStatus.RUNNING.value),
+            ).fetchone()
+        return self._queued_message_from_row(row)
+
+    def requeue_message(self, message_id: str) -> None:
+        """Return a claimed message to the queue when its turn could not start."""
+
+        with self._connect(immediate=True) as connection:
+            connection.execute(
+                """
+                UPDATE message_queue SET status = ?, execution_id = NULL, updated_at = ?
+                WHERE message_id = ? AND status = ?
+                """,
+                (
+                    MessageStatus.QUEUED.value,
+                    datetime.now(UTC).isoformat(),
+                    message_id,
+                    MessageStatus.RUNNING.value,
+                ),
+            )
+
+    def finish_message(
+        self,
+        message_id: str,
+        status: MessageStatus,
+        *,
+        error: str | None = None,
+        expected: MessageStatus = MessageStatus.RUNNING,
+    ) -> bool:
+        """Move a message to a terminal delivery state exactly once."""
+
+        if status not in {MessageStatus.COMPLETED, MessageStatus.FAILED}:
+            raise ValueError("finish_message requires a terminal status")
+        with self._connect(immediate=True) as connection:
+            cursor = connection.execute(
+                """
+                UPDATE message_queue SET status = ?, error = ?, updated_at = ?
+                WHERE message_id = ? AND status = ?
+                """,
+                (
+                    status.value,
+                    error[:2000] if error else None,
+                    datetime.now(UTC).isoformat(),
+                    message_id,
+                    expected.value,
+                ),
+            )
+            return cursor.rowcount == 1
+
+    def message_revision(self, task_id: str) -> str:
+        """Return a cheap fingerprint that changes whenever a task's message states change."""
+
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT COUNT(*) AS total, COALESCE(MAX(updated_at), '') AS latest
+                FROM message_queue WHERE task_id = ?
+                """,
+                (task_id,),
+            ).fetchone()
+        return f"{row['total']}:{row['latest']}"
+
     @staticmethod
     def _record_from_row(row: sqlite3.Row) -> TaskRecord:
         return TaskRecord(
@@ -543,6 +772,22 @@ class SQLiteStorage:
             execution_started_at=row["execution_started_at"],
             execution_heartbeat_at=row["execution_heartbeat_at"],
             pause_requested=bool(row["pause_requested"]),
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+    @staticmethod
+    def _queued_message_from_row(row: sqlite3.Row) -> QueuedMessage:
+        return QueuedMessage(
+            message_id=row["message_id"],
+            task_id=row["task_id"],
+            client_message_id=row["client_message_id"],
+            event_sequence_id=row["event_sequence_id"],
+            actor_id=row["actor_id"],
+            display_name=row["display_name"],
+            status=row["status"],
+            execution_id=row["execution_id"],
+            error=row["error"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],
         )

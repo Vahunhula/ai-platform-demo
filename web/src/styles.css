@@ -523,3 +523,200 @@ details summary {
   color: #f0d58c;
   font-weight: 700;
 }
+
+/* ---- Phase 2: live chat ---- */
+
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.stream-state {
+  padding: 4px 10px;
+  color: #d9e7df;
+  border: 1px solid #52645d;
+  border-radius: 999px;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.stream-live {
+  color: #9fe2c0;
+  border-color: #3f8f69;
+}
+
+.stream-reconnecting {
+  color: #f0d58c;
+  border-color: #9a8540;
+}
+
+.task-activity {
+  display: block;
+  margin-top: 4px;
+  color: #93a099;
+  font-size: 11px;
+}
+
+.tab-body.tab-chat {
+  padding: 0;
+}
+
+.chat {
+  display: flex;
+  flex-direction: column;
+  height: min(68vh, 760px);
+  min-height: 420px;
+}
+
+.chat-log {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 12px;
+  padding: 22px 24px;
+  overflow-y: auto;
+}
+
+.chat .message {
+  max-width: 82%;
+}
+
+.chat .message.human {
+  align-self: flex-end;
+  background: #eef3f7;
+}
+
+.chat .message.agent {
+  align-self: flex-start;
+}
+
+.chat .message p {
+  overflow-wrap: anywhere;
+}
+
+.message.pending {
+  opacity: 0.75;
+  border-style: dashed;
+}
+
+.delivery {
+  display: inline-block;
+  margin-top: 9px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.delivery-queued {
+  color: #6d5a1c;
+  background: #f6ecc8;
+}
+
+.delivery-running {
+  color: #1d6645;
+  background: #d8efe2;
+}
+
+.delivery-failed {
+  color: #8b312e;
+  background: #f8dfdc;
+}
+
+.working {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  align-self: flex-start;
+  padding: 8px 12px;
+  color: #1d6645;
+  background: #e5f3eb;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.working.idle {
+  color: #6d5a1c;
+  background: #f6ecc8;
+}
+
+.spinner {
+  width: 12px;
+  height: 12px;
+  border: 2px solid #9fd1b7;
+  border-top-color: #1d6645;
+  border-radius: 50%;
+  animation: spin 0.9s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.composer {
+  padding: 14px 24px 18px;
+  background: #f8faf8;
+  border-top: 1px solid #d9e0db;
+}
+
+.composer textarea {
+  width: 100%;
+  min-height: 70px;
+  max-height: 240px;
+  padding: 11px 13px;
+  color: #18211e;
+  background: #fff;
+  border: 1px solid #c9d3cc;
+  border-radius: 7px;
+  font: 14px/1.5 inherit;
+  font-family: inherit;
+  resize: vertical;
+}
+
+.composer textarea:focus {
+  outline: 2px solid #83c9a9;
+  border-color: #369269;
+}
+
+.composer textarea:disabled {
+  color: #7b8881;
+  background: #eef1ee;
+}
+
+.composer-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 9px;
+  font-size: 12px;
+}
+
+.composer-error {
+  margin-bottom: 9px;
+  padding: 8px 11px;
+  color: #8b312e;
+  background: #f8dfdc;
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+.send {
+  padding: 8px 20px;
+  color: #fff;
+  background: #1d6645;
+  border: 0;
+  border-radius: 6px;
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.send:disabled {
+  background: #9fb3a8;
+  cursor: not-allowed;
+}

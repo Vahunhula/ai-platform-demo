@@ -3,34 +3,6 @@ import { useState } from "react";
 import type { PlatformEvent } from "../types/api";
 import { formatCommand, formatTime, summarizeEvent } from "./format";
 
-export function ChatTab({ events }: { events: PlatformEvent[] }) {
-  // Only persisted HUMAN_MESSAGE / AGENT_MESSAGE events; nothing is synthesized.
-  const messages = events.filter(
-    (event) => event.event_type === "HUMAN_MESSAGE" || event.event_type === "AGENT_MESSAGE",
-  );
-  if (!messages.length) {
-    return <Empty text="No human or agent messages have been recorded for this task yet." />;
-  }
-  return (
-    <div className="message-list">
-      <p className="tab-note">Read-only. Send messages with the CLI: ai-platform message TASK "…"</p>
-      {messages.map((event) => (
-        <article className={`message ${event.actor_type}`} key={event.sequence_id}>
-          <div className="event-heading">
-            <strong>
-              {event.actor_id} <span className="muted">({event.actor_type})</span>
-            </strong>
-            <time>
-              #{event.sequence_id} · {formatTime(event.timestamp)}
-            </time>
-          </div>
-          <p>{String(event.metadata.message ?? "")}</p>
-        </article>
-      ))}
-    </div>
-  );
-}
-
 export function DiffTab({
   diff,
   workspaceExists,

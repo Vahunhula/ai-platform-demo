@@ -1,4 +1,5 @@
 import type { TaskListItem } from "../types/api";
+import { formatRelative } from "./format";
 
 interface Props {
   tasks: TaskListItem[];
@@ -31,6 +32,7 @@ export function TaskSidebar({ tasks, selectedId, onSelect }: Props) {
               {task.model_tier && ` · ${task.model_tier}`}
               {task.writer && ` · writer: ${task.writer}`}
             </span>
+            <span className="task-activity">updated {formatRelative(task.updated_at)}</span>
           </button>
         ))}
       </nav>

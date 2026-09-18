@@ -1,4 +1,4 @@
-"""FastAPI application factory for the read-only web product shell."""
+"""FastAPI application factory for the AI Platform web interface."""
 
 import logging
 from collections.abc import AsyncIterator
@@ -7,48 +7,112 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from ai_platform.api.presenters import Presenter
+from ai_platform.api.routes.config import router as config_router
 from ai_platform.api.routes.health import router as health_router
+from ai_platform.api.routes.messages import router as messages_router
+from ai_platform.api.routes.stream import router as stream_router
 from ai_platform.api.routes.tasks import router as tasks_router
 from ai_platform.application import ApplicationContext, create_application_context
+from ai_platform.conversation import (
+    ConversationService,
+    IdempotencyConflictError,
+    MessageNotAcceptedError,
+    MessagingDisabledError,
+)
+from ai_platform.runner import TaskTurnRunner
 from ai_platform.sessions import TaskNotFoundError, TaskSessionError
 
 logger = logging.getLogger(__name__)
 
 
-def create_app(context: ApplicationContext | None = None) -> FastAPI:
-    """Create an API using either the configured or an injected platform core."""
+def _wire(
+    application: FastAPI,
+    context: ApplicationContext,
+    runner: TaskTurnRunner | None,
+) -> None:
+    application.state.context = context
+    application.state.runner = runner
+    application.state.presenter = Presenter(context.settings)
+    application.state.conversation = ConversationService(
+        context.sessions,
+        context.storage,
+        context.settings.web_actor,
+        on_submitted=runner.wake if runner is not None else None,
+    )
+
+
+def create_app(
+    context: ApplicationContext | None = None,
+    *,
+    runner: TaskTurnRunner | None = None,
+    stream_poll_seconds: float = 0.5,
+    stream_keepalive_seconds: float = 10.0,
+) -> FastAPI:
+    """Create the API around the configured core, or around an injected one (tests).
+
+    With the configured core, the message runner starts only when
+    ``AI_PLATFORM_ENABLE_RUNNER`` is set. With an injected core, the caller owns
+    the (optional) runner's lifecycle.
+    """
 
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
+        started: TaskTurnRunner | None = None
         if context is None:
-            # No stale-lock recovery: browsing must never change task state.
-            application.state.context = create_application_context()
-        yield
+            # No stale-lock recovery here: browsing must never change task state.
+            configured = create_application_context()
+            if configured.settings.enable_runner:
+                started = TaskTurnRunner(configured.sessions, configured.storage)
+            _wire(application, configured, started)
+            if started is not None:
+                started.start()
+                logger.info("Message runner started")
+        try:
+            yield
+        finally:
+            if started is not None:
+                started.stop()
 
-    application = FastAPI(
-        title="AI Platform API",
-        version="0.6.0",
-        lifespan=lifespan,
-    )
+    application = FastAPI(title="AI Platform API", version="0.7.0", lifespan=lifespan)
+    application.state.stream_poll_seconds = stream_poll_seconds
+    application.state.stream_keepalive_seconds = stream_keepalive_seconds
     if context is not None:
-        application.state.context = context
+        _wire(application, context, runner)
+
+    def error(status_code: int, message: str) -> JSONResponse:
+        return JSONResponse(status_code=status_code, content={"detail": message})
 
     @application.exception_handler(TaskNotFoundError)
-    async def task_not_found(_request: Request, error: TaskNotFoundError) -> JSONResponse:
-        return JSONResponse(status_code=404, content={"detail": str(error)})
+    async def task_not_found(_request: Request, exc: TaskNotFoundError) -> JSONResponse:
+        return error(404, str(exc))
+
+    @application.exception_handler(MessageNotAcceptedError)
+    async def not_accepted(_request: Request, exc: MessageNotAcceptedError) -> JSONResponse:
+        return error(409, f"This task cannot receive messages in its current state: {exc}")
+
+    @application.exception_handler(IdempotencyConflictError)
+    async def idempotency_conflict(
+        _request: Request, exc: IdempotencyConflictError
+    ) -> JSONResponse:
+        return error(409, str(exc))
+
+    @application.exception_handler(MessagingDisabledError)
+    async def messaging_disabled(_request: Request, exc: MessagingDisabledError) -> JSONResponse:
+        return error(503, str(exc))
 
     @application.exception_handler(TaskSessionError)
-    async def task_session_error(_request: Request, error: TaskSessionError) -> JSONResponse:
-        return JSONResponse(status_code=400, content={"detail": str(error)})
+    async def task_session_error(_request: Request, exc: TaskSessionError) -> JSONResponse:
+        return error(400, str(exc))
 
     @application.exception_handler(Exception)
-    async def unexpected_error(request: Request, _error: Exception) -> JSONResponse:
+    async def unexpected_error(request: Request, _exc: Exception) -> JSONResponse:
         # Details (paths, Git output, tracebacks) stay in the server log only.
         logger.exception("Unhandled API error for %s %s", request.method, request.url.path)
-        return JSONResponse(status_code=500, content={"detail": "Internal server error"})
+        return error(500, "Internal server error")
 
-    application.include_router(health_router, prefix="/api")
-    application.include_router(tasks_router, prefix="/api")
+    for router in (health_router, config_router, tasks_router, messages_router, stream_router):
+        application.include_router(router, prefix="/api")
     return application
 
 

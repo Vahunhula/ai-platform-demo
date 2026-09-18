@@ -22,6 +22,7 @@ from ai_platform.sessions import TaskSession, TaskSessionError, TurnOutcome
 from ai_platform.workspace import WorkspaceError
 
 app = typer.Typer(no_args_is_help=True, help="AI Platform Demo CLI")
+SERVE_GRACEFUL_SHUTDOWN_SECONDS = 3
 console = Console()
 
 
@@ -215,11 +216,18 @@ def serve(
     host: str = typer.Option("127.0.0.1", help="HTTP bind address"),
     port: int = typer.Option(8765, min=1, max=65535, help="HTTP port"),
 ) -> None:
-    """Serve the read-only Phase 1 HTTP API (loopback only by default)."""
+    """Serve the HTTP API for the web UI (loopback only by default)."""
 
     import uvicorn
 
-    uvicorn.run("ai_platform.api.app:app", host=host, port=port)
+    # Open SSE streams never finish on their own; bound the graceful shutdown so
+    # Ctrl+C/SIGTERM closes them (clients resume via Last-Event-ID) instead of hanging.
+    uvicorn.run(
+        "ai_platform.api.app:app",
+        host=host,
+        port=port,
+        timeout_graceful_shutdown=SERVE_GRACEFUL_SHUTDOWN_SECONDS,
+    )
 
 
 @app.command()

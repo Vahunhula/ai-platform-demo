@@ -1,29 +1,73 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { api } from "./api/client";
+import { type StreamState, useTaskStream } from "./api/useTaskStream";
+import { ChatPanel } from "./components/ChatPanel";
 import { TaskOverview } from "./components/TaskOverview";
 import { TaskSidebar } from "./components/TaskSidebar";
-import { ChatTab, DiffTab, TestsTab, TraceTab } from "./components/tabs";
-import type { PlatformEvent, TaskDetail, TaskListItem } from "./types/api";
+import { DiffTab, TestsTab, TraceTab } from "./components/tabs";
+import type {
+  ConfigResponse,
+  ConversationMessage,
+  PlatformEvent,
+  TaskDetail,
+  TaskListItem,
+} from "./types/api";
 
 type Tab = "Chat" | "Diff" | "Tests" | "Trace";
 
 const tabs: Tab[] = ["Chat", "Diff", "Tests", "Trace"];
+// Events after which the workspace diff may have changed.
+const DIFF_EVENTS = new Set([
+  "FILE_CHANGED",
+  "HUMAN_WORKSPACE_CHANGED",
+  "AGENT_COMPLETED",
+  "AGENT_FAILED",
+  "WORKSPACE_CREATED",
+  "WORKSPACE_RESET",
+]);
+const REFRESH_DEBOUNCE_MS = 300;
+const TASK_LIST_POLL_MS = 30_000;
 
 function message(reason: unknown): string {
   return reason instanceof Error ? reason.message : String(reason);
 }
 
+function isAbort(reason: unknown): boolean {
+  return reason instanceof DOMException && reason.name === "AbortError";
+}
+
+function mergeEvents(current: PlatformEvent[], incoming: PlatformEvent[]): PlatformEvent[] {
+  const bySequence = new Map(current.map((event) => [event.sequence_id, event]));
+  for (const event of incoming) bySequence.set(event.sequence_id, event);
+  return [...bySequence.values()].sort((left, right) => left.sequence_id - right.sequence_id);
+}
+
+const STREAM_LABEL: Record<StreamState, string> = {
+  idle: "",
+  connecting: "connecting…",
+  live: "live",
+  reconnecting: "reconnecting…",
+};
+
 function App() {
+  const [config, setConfig] = useState<ConfigResponse | null>(null);
   const [tasks, setTasks] = useState<TaskListItem[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<TaskDetail | null>(null);
   const [events, setEvents] = useState<PlatformEvent[]>([]);
+  const [messages, setMessages] = useState<ConversationMessage[] | null>(null);
   // null = not loaded yet for the selected task; "" = loaded and empty.
   const [diff, setDiff] = useState<string | null>(null);
+  // Sequence the live stream starts after; null until the task's history is loaded.
+  const [streamAfter, setStreamAfter] = useState<number | null>(null);
   const [tab, setTab] = useState<Tab>("Chat");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  const selectedRef = useRef<string | null>(null);
+  selectedRef.current = selectedId;
+  const refreshTimer = useRef<number | undefined>(undefined);
 
   const loadTasks = useCallback(async (signal?: AbortSignal) => {
     const nextTasks = await api.listTasks(signal);
@@ -31,51 +75,100 @@ function App() {
     setSelectedId((current) => current ?? nextTasks[0]?.id ?? null);
   }, []);
 
-  const loadSelected = useCallback(async (taskId: string, signal?: AbortSignal) => {
-    const [nextDetail, nextEvents] = await Promise.all([
-      api.getTask(taskId, signal),
-      api.getEvents(taskId, signal),
+  /** Refetch the selected task's derived state; ignore answers for a task no longer shown. */
+  const refreshSelected = useCallback(async (taskId: string) => {
+    const [nextDetail, nextMessages] = await Promise.all([
+      api.getTask(taskId),
+      api.getMessages(taskId),
     ]);
+    if (selectedRef.current !== taskId) return;
     setDetail(nextDetail);
-    setEvents(nextEvents);
-    setDiff(null);
+    setMessages(nextMessages);
   }, []);
+
+  const scheduleRefresh = useCallback(
+    (taskId: string) => {
+      window.clearTimeout(refreshTimer.current);
+      refreshTimer.current = window.setTimeout(() => {
+        refreshSelected(taskId).catch((reason: unknown) => setError(message(reason)));
+        loadTasks().catch(() => undefined);
+      }, REFRESH_DEBOUNCE_MS);
+    },
+    [loadTasks, refreshSelected],
+  );
 
   useEffect(() => {
     const controller = new AbortController();
+    api
+      .getConfig(controller.signal)
+      .then(setConfig)
+      .catch((reason: unknown) => {
+        if (!isAbort(reason)) setError(message(reason));
+      });
     loadTasks(controller.signal)
       .catch((reason: unknown) => {
-        if (!controller.signal.aborted) setError(message(reason));
+        if (!isAbort(reason)) setError(message(reason));
       })
       .finally(() => {
         if (!controller.signal.aborted) setLoading(false);
       });
-    return () => controller.abort();
+    const poll = window.setInterval(() => loadTasks().catch(() => undefined), TASK_LIST_POLL_MS);
+    return () => {
+      controller.abort();
+      window.clearInterval(poll);
+    };
   }, [loadTasks]);
 
+  // Load the selected task's full history, then start the live stream after it.
   useEffect(() => {
     if (!selectedId) return;
     const controller = new AbortController();
     setLoading(true);
     setError(null);
-    loadSelected(selectedId, controller.signal)
+    Promise.all([
+      api.getTask(selectedId, controller.signal),
+      api.getEvents(selectedId, controller.signal),
+      api.getMessages(selectedId, controller.signal),
+    ])
+      .then(([nextDetail, nextEvents, nextMessages]) => {
+        setDetail(nextDetail);
+        setEvents(nextEvents);
+        setMessages(nextMessages);
+        setDiff(null);
+        setStreamAfter(nextEvents.at(-1)?.sequence_id ?? 0);
+      })
       .catch((reason: unknown) => {
-        if (!controller.signal.aborted) setError(message(reason));
+        if (!isAbort(reason)) setError(message(reason));
       })
       .finally(() => {
         if (!controller.signal.aborted) setLoading(false);
       });
     return () => controller.abort();
-  }, [loadSelected, selectedId]);
+  }, [selectedId]);
+
+  const streamState = useTaskStream(selectedId, streamAfter, {
+    onEvent: (event) => {
+      const taskId = selectedRef.current;
+      if (!taskId) return;
+      setEvents((current) => mergeEvents(current, [event]));
+      if (DIFF_EVENTS.has(event.event_type)) setDiff(null);
+      scheduleRefresh(taskId);
+    },
+    onConversation: () => {
+      if (selectedRef.current) scheduleRefresh(selectedRef.current);
+    },
+  });
 
   useEffect(() => {
     if (tab !== "Diff" || !detail || diff !== null) return;
     const controller = new AbortController();
     api
       .getDiff(detail.id, controller.signal)
-      .then((response) => setDiff(response.diff))
+      .then((response) => {
+        if (selectedRef.current === response.task_id) setDiff(response.diff);
+      })
       .catch((reason: unknown) => {
-        if (!controller.signal.aborted) setError(message(reason));
+        if (!isAbort(reason)) setError(message(reason));
       });
     return () => controller.abort();
   }, [detail, diff, tab]);
@@ -85,7 +178,16 @@ function App() {
     setError(null);
     try {
       await loadTasks();
-      if (selectedId) await loadSelected(selectedId);
+      if (selectedId) {
+        const [nextEvents] = await Promise.all([
+          api.getEvents(selectedId),
+          refreshSelected(selectedId),
+        ]);
+        if (selectedRef.current === selectedId) {
+          setEvents((current) => mergeEvents(current, nextEvents));
+          setDiff(null);
+        }
+      }
     } catch (reason) {
       setError(message(reason));
     } finally {
@@ -95,9 +197,12 @@ function App() {
 
   const selectTask = (taskId: string) => {
     if (taskId === selectedId) return;
+    window.clearTimeout(refreshTimer.current);
     setDetail(null);
     setEvents([]);
+    setMessages(null);
     setDiff(null);
+    setStreamAfter(null);
     setSelectedId(taskId);
   };
 
@@ -105,12 +210,19 @@ function App() {
     <div className="app-shell">
       <header className="topbar">
         <div>
-          <span className="eyebrow">Read-only view · control via CLI</span>
+          <span className="eyebrow">
+            Shared TaskSessions · {config?.messaging_enabled ? `web actor: ${config.web_actor}` : "read-only"}
+          </span>
           <h1>AI Platform</h1>
         </div>
-        <button className="refresh" onClick={refresh} disabled={loading}>
-          {loading ? "Loading…" : "Refresh"}
-        </button>
+        <div className="topbar-actions">
+          {streamState !== "idle" && (
+            <span className={`stream-state stream-${streamState}`}>{STREAM_LABEL[streamState]}</span>
+          )}
+          <button className="refresh" onClick={refresh} disabled={loading}>
+            {loading ? "Loading…" : "Refresh"}
+          </button>
+        </div>
       </header>
 
       <div className="workspace">
@@ -149,8 +261,15 @@ function App() {
                     </button>
                   ))}
                 </div>
-                <div className="tab-body" role="tabpanel">
-                  {tab === "Chat" && <ChatTab events={events} />}
+                <div className={`tab-body ${tab === "Chat" ? "tab-chat" : ""}`} role="tabpanel">
+                  {tab === "Chat" && (
+                    <ChatPanel
+                      detail={detail}
+                      config={config}
+                      messages={messages}
+                      onSubmitted={() => scheduleRefresh(detail.id)}
+                    />
+                  )}
                   {tab === "Diff" && (
                     <DiffTab diff={diff} workspaceExists={detail.workspace_id !== null} />
                   )}

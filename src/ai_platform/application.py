@@ -1,5 +1,6 @@
 """Application composition shared by the CLI and HTTP interface."""
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from ai_platform.config import Settings
@@ -28,12 +29,14 @@ def create_application_context(
     settings: Settings | None = None,
     *,
     lock_recovery_client: str | None = None,
+    executor_factory: Callable[[], AgentExecutor] | None = None,
 ) -> ApplicationContext:
     """Compose the platform core and ensure configured task definitions exist.
 
     ``lock_recovery_client`` names the interface performing startup stale-lock
     recovery (the CLI passes ``"cli-startup"``). ``None`` skips recovery, which
     keeps read-only interfaces such as the HTTP API free of state changes.
+    ``executor_factory`` defaults to the configured real executor; tests inject fakes.
     """
 
     configured = settings or Settings.from_env()
@@ -61,7 +64,7 @@ def create_application_context(
         storage,
         workspaces,
         ModelRouter.from_settings(configured),
-        lambda: create_executor(configured),
+        executor_factory or (lambda: create_executor(configured)),
     )
     if lock_recovery_client is not None:
         sessions.recover_stale_locks(

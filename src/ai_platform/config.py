@@ -1,6 +1,7 @@
 """Environment-backed application configuration."""
 
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,31 @@ def _positive_int(values: dict[str, Any], name: str, default: int) -> int:
     if value < 1:
         raise ValueError(f"{name} must be greater than zero")
     return value
+
+
+_WEB_ACTOR_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+_TRUE_VALUES = {"1", "true", "yes", "on"}
+_FALSE_VALUES = {"", "0", "false", "no", "off"}
+
+
+def _flag(values: dict[str, Any], name: str) -> bool:
+    raw_value = str(values.get(name) or "").strip().lower()
+    if raw_value in _TRUE_VALUES:
+        return True
+    if raw_value in _FALSE_VALUES:
+        return False
+    raise ValueError(f"{name} must be one of 1/0, true/false, yes/no, on/off")
+
+
+def _web_actor(values: dict[str, Any]) -> str | None:
+    raw_value = str(values.get("AI_PLATFORM_WEB_ACTOR") or "").strip()
+    if not raw_value:
+        return None
+    if not _WEB_ACTOR_PATTERN.fullmatch(raw_value):
+        raise ValueError(
+            "AI_PLATFORM_WEB_ACTOR must be 1-64 characters of letters, digits, '.', '_' or '-'"
+        )
+    return raw_value
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,6 +72,10 @@ class Settings:
     max_attempts_per_tier: int
     lock_heartbeat_seconds: int
     lock_stale_seconds: int
+    # Server-configured actor for browser messages. This is not authentication.
+    web_actor: str | None = None
+    # Whether the HTTP API process executes queued browser messages.
+    enable_runner: bool = False
 
     @classmethod
     def from_env(cls, project_root: Path | None = None) -> "Settings":
@@ -103,4 +133,6 @@ class Settings:
             ),
             lock_heartbeat_seconds=heartbeat_seconds,
             lock_stale_seconds=stale_seconds,
+            web_actor=_web_actor(values),
+            enable_runner=_flag(values, "AI_PLATFORM_ENABLE_RUNNER"),
         )

@@ -1,7 +1,12 @@
 #!/bin/sh
-# Serve the read-only Demo 2 HTTP API from this checkout against the shared
-# hosted-demo runtime (/var/lib/ai-platform), mirroring /usr/local/bin/ai-platform.
+# Serve the Demo 2 HTTP API from this checkout against the shared hosted-demo
+# runtime (/var/lib/ai-platform), mirroring /usr/local/bin/ai-platform.
 # Any AI_PLATFORM_* variable already set in the environment takes precedence.
+#
+# Browser messaging needs both (see docs/demo2-ui.md):
+#   AI_PLATFORM_WEB_ACTOR=<name>     server-configured web actor (not authentication)
+#   AI_PLATFORM_ENABLE_RUNNER=1      execute queued browser messages in this process
+# Without them the API is read-only.
 set -eu
 
 umask 0002

@@ -15,6 +15,16 @@ export function formatDateTime(timestamp: string): string {
   }).format(new Date(timestamp));
 }
 
+export function formatRelative(timestamp: string, now: number = Date.now()): string {
+  const seconds = Math.max(0, Math.round((now - new Date(timestamp).getTime()) / 1000));
+  if (seconds < 60) return "just now";
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 48) return `${hours} h ago`;
+  return formatDateTime(timestamp);
+}
+
 function text(value: unknown): string | null {
   if (value === null || value === undefined || value === "") return null;
   return typeof value === "string" ? value : JSON.stringify(value);

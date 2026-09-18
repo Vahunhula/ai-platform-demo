@@ -43,6 +43,15 @@ class VerificationStatus(StrEnum):
     FAILED = "failed"
 
 
+class MessageStatus(StrEnum):
+    """Delivery state of a queued browser message; its content lives in the event log."""
+
+    QUEUED = "queued"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
 class VerificationType(StrEnum):
     """Supported structured verification runners."""
 
@@ -134,3 +143,19 @@ class TaskRecord(BaseModel):
         """Return whether a human shell currently owns the workspace lock."""
 
         return self.active_execution is ExecutionKind.HUMAN_SHELL
+
+
+class QueuedMessage(BaseModel):
+    """Durable delivery record for one browser message (content is its HUMAN_MESSAGE event)."""
+
+    message_id: str
+    task_id: str
+    client_message_id: str
+    event_sequence_id: int
+    actor_id: str
+    display_name: str
+    status: MessageStatus
+    execution_id: str | None = None
+    error: str | None = None
+    created_at: datetime
+    updated_at: datetime
