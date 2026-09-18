@@ -1,10 +1,31 @@
 // Mirrors the Pydantic contracts in src/ai_platform/api/schemas.py. Keep both in sync.
 
 export interface ConfigResponse {
-  messaging_enabled: boolean;
-  web_actor: string | null;
   runner_enabled: boolean;
   max_message_length: number;
+  presence_heartbeat_seconds: number;
+}
+
+export type Role = "viewer" | "developer" | "admin";
+
+/** The authenticated user (from the session cookie; never stored by the browser). */
+export interface CurrentUser {
+  id: string;
+  username: string;
+  display_name: string;
+  role: Role;
+  can_modify_tasks: boolean;
+}
+
+export interface PresenceUser {
+  user_id: string;
+  username: string;
+  display_name: string;
+}
+
+export interface PresenceResponse {
+  task_id: string;
+  viewers: PresenceUser[];
 }
 
 export interface TaskListItem {
@@ -66,6 +87,7 @@ export interface PlatformEvent {
   event_type: string;
   actor_type: string;
   actor_id: string;
+  actor_display_name: string;
   execution_id: string | null;
   metadata: Record<string, unknown>;
 }
@@ -82,6 +104,7 @@ export interface ConversationMessage {
   task_id: string;
   role: "human" | "agent";
   actor_id: string;
+  actor_display_name: string;
   content: string;
   timestamp: string;
   sequence_id: number;

@@ -11,6 +11,10 @@ Protocol (``text/event-stream``):
   heartbeat intervals knows the connection is dead even when a proxy keeps it
   open, and reconnects from its last sequence.
 
+Authentication: the session cookie is checked when the stream opens (401
+otherwise) and re-checked every heartbeat interval; a stream whose session was
+revoked, expired or whose user was disabled ends, and reconnects get 401.
+
 The cursor is the durable event sequence. A reconnecting ``EventSource`` sends
 ``Last-Event-ID`` automatically and the stream resumes with the next event; an
 explicit ``?after=N`` does the same for a first connection. Correctness relies
@@ -28,7 +32,9 @@ from fastapi.responses import StreamingResponse
 
 from ai_platform.api.dependencies import ContextDependency, PresenterDependency
 from ai_platform.api.presenters import Presenter
+from ai_platform.api.security import UserDependency, session_secret
 from ai_platform.application import ApplicationContext
+from ai_platform.auth import AuthService
 
 router = APIRouter(prefix="/tasks", tags=["stream"])
 
@@ -53,15 +59,21 @@ async def event_stream(
     cursor: int,
     *,
     is_disconnected: Callable[[], Awaitable[bool]],
+    still_authenticated: Callable[[], Awaitable[bool]],
     poll_seconds: float,
     keepalive_seconds: float,
 ) -> AsyncIterator[str]:
-    """Yield SSE frames for events after ``cursor`` until the client disconnects."""
+    """Yield SSE frames for events after ``cursor`` until disconnect or session end."""
 
     yield f"retry: {_RETRY_MILLISECONDS}\n\n"
     revision: str | None = None
     last_sent = monotonic()
+    last_auth_check = monotonic()
     while not await is_disconnected():
+        if monotonic() - last_auth_check >= keepalive_seconds:
+            if not await still_authenticated():
+                return
+            last_auth_check = monotonic()
         events = await run_in_threadpool(context.storage.get_events_after, task_id, cursor)
         for event in events:
             cursor = event.sequence_id or cursor
@@ -85,11 +97,18 @@ async def stream_task(
     request: Request,
     context: ContextDependency,
     presenter: PresenterDependency,
+    _user: UserDependency,
     after: int | None = Query(default=None, ge=0),
     last_event_id: str | None = Header(default=None),
 ) -> StreamingResponse:
     definition = await run_in_threadpool(context.sessions.get_definition, task_id)
     cursor = _cursor(last_event_id, after)
+    auth: AuthService = request.app.state.auth
+    secret = session_secret(request)
+
+    async def still_authenticated() -> bool:
+        return await run_in_threadpool(auth.resolve, secret) is not None
+
     return StreamingResponse(
         event_stream(
             context,
@@ -97,6 +116,7 @@ async def stream_task(
             definition.id,
             cursor,
             is_disconnected=request.is_disconnected,
+            still_authenticated=still_authenticated,
             poll_seconds=request.app.state.stream_poll_seconds,
             keepalive_seconds=request.app.state.stream_keepalive_seconds,
         ),

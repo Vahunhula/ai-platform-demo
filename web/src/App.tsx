@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { api } from "./api/client";
+import { usePresence } from "./api/usePresence";
 import { type StreamState, useTaskStream } from "./api/useTaskStream";
 import { ChatPanel } from "./components/ChatPanel";
 import { TaskOverview } from "./components/TaskOverview";
@@ -10,6 +11,7 @@ import { DiffTab, TestsTab, TraceTab } from "./components/tabs";
 import type {
   ConfigResponse,
   ConversationMessage,
+  CurrentUser,
   PlatformEvent,
   TaskDetail,
   TaskListItem,
@@ -51,7 +53,23 @@ const STREAM_LABEL: Record<StreamState, string> = {
   reconnecting: "reconnecting…",
 };
 
-function App() {
+function initials(name: string): string {
+  const parts = name.trim().split(/\s+/);
+  return (parts.length > 1 ? parts[0][0] + parts[parts.length - 1][0] : name.slice(0, 2)).toUpperCase();
+}
+
+const ROLE_LABEL: Record<CurrentUser["role"], string> = {
+  viewer: "Viewer",
+  developer: "Developer",
+  admin: "Admin",
+};
+
+interface AppProps {
+  user: CurrentUser;
+  onSignOut: () => void;
+}
+
+function App({ user, onSignOut }: AppProps) {
   const [config, setConfig] = useState<ConfigResponse | null>(null);
   const [tasks, setTasks] = useState<TaskListItem[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -147,6 +165,8 @@ function App() {
     return () => controller.abort();
   }, [selectedId]);
 
+  const viewers = usePresence(selectedId, config?.presence_heartbeat_seconds ?? 15);
+
   const streamState = useTaskStream(selectedId, streamAfter, {
     onEvent: (event) => {
       const taskId = selectedRef.current;
@@ -211,12 +231,25 @@ function App() {
     <div className="app-shell">
       <header className="topbar">
         <div>
-          <span className="eyebrow">
-            Shared TaskSessions · {config?.messaging_enabled ? `web actor: ${config.web_actor}` : "read-only"}
-          </span>
+          <span className="eyebrow">Shared TaskSessions</span>
           <h1>AI Platform</h1>
         </div>
         <div className="topbar-actions">
+          <div className="current-user">
+            <span className="avatar" aria-hidden="true">
+              {initials(user.display_name)}
+            </span>
+            <span>
+              <strong>{user.display_name}</strong>
+              <small>
+                {ROLE_LABEL[user.role]}
+                {!user.can_modify_tasks && " · read-only access"}
+              </small>
+            </span>
+            <button className="refresh" onClick={onSignOut}>
+              Log out
+            </button>
+          </div>
           {streamState !== "idle" && (
             <span className={`stream-state stream-${streamState}`}>{STREAM_LABEL[streamState]}</span>
           )}
@@ -241,9 +274,31 @@ function App() {
                   <span className="task-kicker">{detail.id}</span>
                   <h2>{detail.title}</h2>
                 </div>
-                <span className={`hero-status status-${detail.status.toLowerCase()}`}>
-                  {detail.status}
-                </span>
+                <div className="header-side">
+                  <span className={`hero-status status-${detail.status.toLowerCase()}`}>
+                    {detail.status}
+                  </span>
+                  {viewers.length > 0 && (
+                    <div
+                      className="presence"
+                      title={`${viewers.map((viewer) => viewer.display_name).join(", ")} viewing`}
+                    >
+                      <span className="muted">Viewing</span>
+                      {viewers.map((viewer) => (
+                        <span
+                          key={viewer.user_id}
+                          className={`avatar ${viewer.user_id === user.id ? "self" : ""}`}
+                          aria-label={viewer.display_name}
+                        >
+                          {initials(viewer.display_name)}
+                        </span>
+                      ))}
+                      <span className="presence-names">
+                        {viewers.map((viewer) => viewer.display_name).join(" · ")}
+                      </span>
+                    </div>
+                  )}
+                </div>
               </section>
 
               <section className="task-state">
@@ -287,6 +342,7 @@ function App() {
                     <ChatPanel
                       detail={detail}
                       config={config}
+                      user={user}
                       messages={messages}
                       onSubmitted={() => scheduleRefresh(detail.id)}
                     />

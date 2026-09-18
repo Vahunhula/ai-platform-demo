@@ -123,8 +123,8 @@ function TraceEvent({ event }: { event: PlatformEvent }) {
           <strong>{event.event_type}</strong>
           <time>{formatTime(event.timestamp)}</time>
         </div>
-        <span className="actor">
-          {event.actor_id} <span className="muted">({event.actor_type})</span>
+        <span className="actor" title={event.actor_id}>
+          {event.actor_display_name} <span className="muted">({event.actor_type})</span>
         </span>
         {summary && <p className="event-summary">{summary}</p>}
         {hasMetadata && (

@@ -51,7 +51,26 @@ export function formatCommand(value: unknown): string | null {
 /** One human-readable line describing a public platform event, from persisted metadata only. */
 export function summarizeEvent(event: PlatformEvent): string | null {
   const m = event.metadata;
+  const who = event.actor_display_name;
   switch (event.event_type) {
+    case "TASK_STARTED":
+      return `${who} started the task`;
+    case "HUMAN_PAUSED":
+      return m.deferred
+        ? `${who} requested a pause (agent stops at its next safe point)`
+        : `${who} paused the task`;
+    case "HUMAN_RESUMED":
+      return `${who} resumed the task`;
+    case "HUMAN_APPROVED":
+      return `${who} approved the task`;
+    case "HUMAN_REJECTED":
+      return `${who} rejected the result: ${text(m.message) ?? ""}`;
+    case "TASK_RESET":
+      return `${who} reset the task`;
+    case "WORKSPACE_RESET":
+      return `${who} deleted the task workspace`;
+    case "HUMAN_CONNECTED":
+      return `${who} attached from the CLI`;
     case "TASK_CREATED":
       return text(m.title);
     case "MODEL_SELECTED":
@@ -62,7 +81,6 @@ export function summarizeEvent(event: PlatformEvent): string | null {
         text(m.reason),
       );
     case "STATUS_CHANGED":
-    case "HUMAN_PAUSED":
       return m.from || m.to ? `${upper(m.from) ?? "?"} → ${upper(m.to) ?? "?"}` : null;
     case "AGENT_STARTED":
       return joined(
@@ -78,8 +96,9 @@ export function summarizeEvent(event: PlatformEvent): string | null {
     case "AGENT_TOOL_ACTIVITY":
       return joined(text(m.tool), text(m.summary));
     case "AGENT_MESSAGE":
-    case "HUMAN_MESSAGE":
       return text(m.message);
+    case "HUMAN_MESSAGE":
+      return `${who}: ${text(m.message) ?? ""}`;
     case "FILE_CHANGED":
       return joined(text(m.change_type), text(m.path));
     case "HUMAN_WORKSPACE_CHANGED":

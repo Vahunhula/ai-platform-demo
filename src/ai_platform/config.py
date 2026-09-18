@@ -25,7 +25,7 @@ def _positive_int(values: dict[str, Any], name: str, default: int) -> int:
     return value
 
 
-_WEB_ACTOR_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+_ORIGIN_PATTERN = re.compile(r"^https?://[A-Za-z0-9.-]+(:[0-9]{1,5})?$")
 _TRUE_VALUES = {"1", "true", "yes", "on"}
 _FALSE_VALUES = {"", "0", "false", "no", "off"}
 
@@ -39,15 +39,13 @@ def _flag(values: dict[str, Any], name: str) -> bool:
     raise ValueError(f"{name} must be one of 1/0, true/false, yes/no, on/off")
 
 
-def _web_actor(values: dict[str, Any]) -> str | None:
-    raw_value = str(values.get("AI_PLATFORM_WEB_ACTOR") or "").strip()
-    if not raw_value:
-        return None
-    if not _WEB_ACTOR_PATTERN.fullmatch(raw_value):
-        raise ValueError(
-            "AI_PLATFORM_WEB_ACTOR must be 1-64 characters of letters, digits, '.', '_' or '-'"
-        )
-    return raw_value
+def _origins(values: dict[str, Any]) -> tuple[str, ...]:
+    raw_value = str(values.get("AI_PLATFORM_ALLOWED_ORIGINS") or "").strip()
+    origins = tuple(item.strip().rstrip("/") for item in raw_value.split(",") if item.strip())
+    for origin in origins:
+        if not _ORIGIN_PATTERN.fullmatch(origin):
+            raise ValueError(f"AI_PLATFORM_ALLOWED_ORIGINS contains an invalid origin: {origin}")
+    return origins
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,10 +70,13 @@ class Settings:
     max_attempts_per_tier: int
     lock_heartbeat_seconds: int
     lock_stale_seconds: int
-    # Server-configured actor for browser messages. This is not authentication.
-    web_actor: str | None = None
-    # Whether the HTTP API process executes queued browser messages.
+    # Whether the HTTP API process executes browser-initiated agent turns.
     enable_runner: bool = False
+    # Web session lifetime and cookie policy (Demo 2 Phase 4 authentication).
+    session_hours: int = 12
+    cookie_secure: bool = False
+    # Extra browser origins allowed to send mutations, besides the request's own host.
+    allowed_origins: tuple[str, ...] = ()
 
     @classmethod
     def from_env(cls, project_root: Path | None = None) -> "Settings":
@@ -133,6 +134,8 @@ class Settings:
             ),
             lock_heartbeat_seconds=heartbeat_seconds,
             lock_stale_seconds=stale_seconds,
-            web_actor=_web_actor(values),
             enable_runner=_flag(values, "AI_PLATFORM_ENABLE_RUNNER"),
+            session_hours=_positive_int(values, "AI_PLATFORM_SESSION_HOURS", 12),
+            cookie_secure=_flag(values, "AI_PLATFORM_COOKIE_SECURE"),
+            allowed_origins=_origins(values),
         )

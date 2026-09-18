@@ -2,7 +2,7 @@ import { type KeyboardEvent, useEffect, useLayoutEffect, useRef, useState } from
 
 import { ApiError, api } from "../api/client";
 import { newClientId } from "../api/ids";
-import type { ConfigResponse, ConversationMessage, TaskDetail } from "../types/api";
+import type { ConfigResponse, ConversationMessage, CurrentUser, TaskDetail } from "../types/api";
 import { formatTime } from "./format";
 
 /** A message this browser tab sent that the server's conversation does not show yet. */
@@ -22,11 +22,12 @@ const STATUS_LABEL: Record<string, string> = {
 interface Props {
   detail: TaskDetail;
   config: ConfigResponse | null;
+  user: CurrentUser;
   messages: ConversationMessage[] | null;
   onSubmitted: () => void;
 }
 
-export function ChatPanel({ detail, config, messages, onSubmitted }: Props) {
+export function ChatPanel({ detail, config, user, messages, onSubmitted }: Props) {
   const [draft, setDraft] = useState("");
   const [pending, setPending] = useState<PendingMessage[]>([]);
   const [composerError, setComposerError] = useState<string | null>(null);
@@ -56,13 +57,12 @@ export function ChatPanel({ detail, config, messages, onSubmitted }: Props) {
   const running = messages?.some((message) => message.status === "RUNNING") ?? false;
   const working = detail.agent_working || running;
   const maxLength = config?.max_message_length ?? 8000;
+  // The backend decides (role + task state); the UI only renders its reason.
   const disabledReason = !config
     ? "Loading…"
-    : !config.messaging_enabled
-      ? "Browser messaging is disabled on this server (AI_PLATFORM_WEB_ACTOR is not set)."
-      : !detail.messaging.accepting
-        ? (detail.messaging.reason ?? "This task cannot receive messages in its current state.")
-        : null;
+    : !detail.messaging.accepting
+      ? (detail.messaging.reason ?? "This task cannot receive messages in its current state.")
+      : null;
 
   async function send(text: string, clientMessageId: string) {
     setComposerError(null);
@@ -128,10 +128,14 @@ export function ChatPanel({ detail, config, messages, onSubmitted }: Props) {
           <div className="empty-state">No messages in this task's conversation yet.</div>
         )}
         {messages?.map((message) => (
-          <article className={`message ${message.role}`} key={message.id}>
+          <article
+            className={`message ${message.role} ${message.actor_id === user.username ? "own" : ""}`}
+            key={message.id}
+          >
             <div className="event-heading">
-              <strong>
-                {message.actor_id} <span className="muted">({message.role})</span>
+              <strong title={message.actor_id}>
+                {message.actor_display_name}
+                {message.role === "agent" && <span className="muted"> (agent)</span>}
               </strong>
               <time>
                 #{message.sequence_id} · {formatTime(message.timestamp)}
@@ -147,10 +151,10 @@ export function ChatPanel({ detail, config, messages, onSubmitted }: Props) {
           </article>
         ))}
         {pending.map((item) => (
-          <article className="message human pending" key={item.clientMessageId}>
+          <article className="message human own pending" key={item.clientMessageId}>
             <div className="event-heading">
               <strong>
-                {config?.web_actor ?? "you"} <span className="muted">(human)</span>
+                {user.display_name}
               </strong>
               <time>{item.state === "failed" ? "not sent" : "sending…"}</time>
             </div>
@@ -186,7 +190,8 @@ export function ChatPanel({ detail, config, messages, onSubmitted }: Props) {
           onChange={(event) => setDraft(event.target.value)}
           onKeyDown={onKeyDown}
           placeholder={
-            disabledReason ?? `Message ${detail.id} as ${config?.web_actor} (Enter to send, Shift+Enter for a new line)`
+            disabledReason ??
+            `Message ${detail.id} as ${user.display_name} (Enter to send, Shift+Enter for a new line)`
           }
           disabled={disabledReason !== null}
           rows={3}
@@ -199,7 +204,7 @@ export function ChatPanel({ detail, config, messages, onSubmitted }: Props) {
               ? "Read-only"
               : working
                 ? "Claude is busy; your message will be queued."
-                : `Posting as ${config?.web_actor} (server-configured, not authenticated)`}
+                : `Posting as ${user.display_name} · visible to everyone on this task`}
           </span>
           <button
             className="send"

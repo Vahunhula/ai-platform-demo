@@ -5,6 +5,7 @@ from fastapi.responses import JSONResponse
 
 from ai_platform.api.dependencies import ConversationDependency, PresenterDependency
 from ai_platform.api.schemas import MessageResponse, PostMessageRequest, PostMessageResponse
+from ai_platform.api.security import DeveloperDependency
 
 router = APIRouter(prefix="/tasks", tags=["messages"])
 
@@ -22,16 +23,20 @@ def list_messages(
     "/{task_id}/messages",
     status_code=202,
     response_model=PostMessageResponse,
-    responses={404: {}, 409: {}, 422: {}, 503: {}},
+    responses={401: {}, 403: {}, 404: {}, 409: {}, 422: {}},
 )
 def post_message(
     task_id: str,
     body: PostMessageRequest,
     conversation: ConversationDependency,
+    user: DeveloperDependency,
 ) -> JSONResponse:
-    """Persist the message and queue its agent turn; never waits for the agent."""
+    """Persist the message and queue its agent turn; never waits for the agent.
 
-    result = conversation.submit(task_id, body.message, body.client_message_id)
+    The author is the authenticated session user; the body cannot name one.
+    """
+
+    result = conversation.submit(task_id, body.message, body.client_message_id, user.human)
     response = PostMessageResponse(
         message_id=result.message.message_id,
         client_message_id=result.message.client_message_id,

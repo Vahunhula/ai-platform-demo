@@ -1,27 +1,38 @@
 """FastAPI application factory for the AI Platform web interface."""
 
 import logging
+import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import timedelta
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from ai_platform.api.presenters import Presenter
+from ai_platform.api.routes.auth import router as auth_router
 from ai_platform.api.routes.config import router as config_router
 from ai_platform.api.routes.controls import router as controls_router
 from ai_platform.api.routes.health import router as health_router
 from ai_platform.api.routes.messages import router as messages_router
+from ai_platform.api.routes.presence import router as presence_router
 from ai_platform.api.routes.stream import router as stream_router
 from ai_platform.api.routes.tasks import router as tasks_router
+from ai_platform.api.security import SameOriginMutationMiddleware, require_user
 from ai_platform.application import ApplicationContext, create_application_context
-from ai_platform.controls import ActionConflictError, RunnerUnavailableError, TaskControlService
+from ai_platform.auth import AuthService, InvalidCredentialsError
+from ai_platform.controls import (
+    ActionConflictError,
+    PermissionDeniedError,
+    RunnerUnavailableError,
+    TaskControlService,
+)
 from ai_platform.conversation import (
     ConversationService,
     IdempotencyConflictError,
     MessageNotAcceptedError,
-    MessagingDisabledError,
 )
+from ai_platform.presence import PresenceService
 from ai_platform.runner import TaskTurnRunner
 from ai_platform.sessions import ExecutorUnavailableError, TaskNotFoundError, TaskSessionError
 
@@ -33,18 +44,20 @@ def _wire(
     context: ApplicationContext,
     runner: TaskTurnRunner | None,
 ) -> None:
+    settings = context.settings
+    auth = AuthService(context.storage, session_ttl=timedelta(hours=settings.session_hours))
     application.state.context = context
     application.state.runner = runner
-    application.state.presenter = Presenter(context.settings)
+    application.state.auth = auth
+    application.state.cookie_secure = settings.cookie_secure
+    application.state.presence = PresenceService(context.storage, auth)
+    application.state.presenter = Presenter(settings, auth.display_names)
     application.state.conversation = ConversationService(
         context.sessions,
         context.storage,
-        context.settings.web_actor,
         on_submitted=runner.wake if runner is not None else None,
     )
-    application.state.controls = TaskControlService(
-        context.sessions, context.storage, application.state.conversation, runner
-    )
+    application.state.controls = TaskControlService(context.sessions, context.storage, runner)
 
 
 def create_app(
@@ -65,6 +78,11 @@ def create_app(
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
         started: TaskTurnRunner | None = None
         if context is None:
+            if os.environ.get("AI_PLATFORM_WEB_ACTOR"):
+                logger.warning(
+                    "AI_PLATFORM_WEB_ACTOR is ignored since Demo 2 Phase 4: web identity "
+                    "comes from login sessions (see `ai-platform users --help`)."
+                )
             # No stale-lock recovery here: browsing must never change task state.
             configured = create_application_context()
             if configured.settings.enable_runner:
@@ -79,17 +97,30 @@ def create_app(
             if started is not None:
                 started.stop()
 
-    application = FastAPI(title="AI Platform API", version="0.7.0", lifespan=lifespan)
+    settings_origins = context.settings.allowed_origins if context is not None else ()
+    application = FastAPI(title="AI Platform API", version="0.8.0", lifespan=lifespan)
     application.state.stream_poll_seconds = stream_poll_seconds
     application.state.stream_keepalive_seconds = stream_keepalive_seconds
     if context is not None:
         _wire(application, context, runner)
+    application.add_middleware(
+        SameOriginMutationMiddleware,
+        allowed_origins=settings_origins or _env_allowed_origins(),
+    )
 
     def error(status_code: int, message: str) -> JSONResponse:
         # Client-safe messages still pass the path redactor before leaving the server.
         presenter = getattr(application.state, "presenter", None)
         detail = presenter.redactor.text(message) if presenter is not None else message
         return JSONResponse(status_code=status_code, content={"detail": detail})
+
+    @application.exception_handler(InvalidCredentialsError)
+    async def invalid_credentials(_request: Request, _exc: InvalidCredentialsError) -> JSONResponse:
+        return error(401, "Invalid credentials")
+
+    @application.exception_handler(PermissionDeniedError)
+    async def permission_denied(_request: Request, exc: PermissionDeniedError) -> JSONResponse:
+        return error(403, str(exc))
 
     @application.exception_handler(TaskNotFoundError)
     async def task_not_found(_request: Request, exc: TaskNotFoundError) -> JSONResponse:
@@ -119,10 +150,6 @@ def create_app(
     ) -> JSONResponse:
         return error(503, f"The agent executor is unavailable: {exc}")
 
-    @application.exception_handler(MessagingDisabledError)
-    async def messaging_disabled(_request: Request, exc: MessagingDisabledError) -> JSONResponse:
-        return error(503, str(exc))
-
     @application.exception_handler(TaskSessionError)
     async def task_session_error(_request: Request, exc: TaskSessionError) -> JSONResponse:
         return error(400, str(exc))
@@ -133,16 +160,25 @@ def create_app(
         logger.exception("Unhandled API error for %s %s", request.method, request.url.path)
         return error(500, "Internal server error")
 
+    # Unauthenticated: health and the auth endpoints (login decides for itself).
+    application.include_router(health_router, prefix="/api")
+    application.include_router(auth_router, prefix="/api")
+    # Everything else requires a live session (401); mutations add role checks (403).
     for router in (
-        health_router,
         config_router,
         tasks_router,
         messages_router,
         controls_router,
+        presence_router,
         stream_router,
     ):
-        application.include_router(router, prefix="/api")
+        application.include_router(router, prefix="/api", dependencies=[Depends(require_user)])
     return application
+
+
+def _env_allowed_origins() -> tuple[str, ...]:
+    raw = os.environ.get("AI_PLATFORM_ALLOWED_ORIGINS", "")
+    return tuple(item.strip().rstrip("/") for item in raw.split(",") if item.strip())
 
 
 app = create_app()

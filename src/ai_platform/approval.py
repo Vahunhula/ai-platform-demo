@@ -28,6 +28,13 @@ def approve_task(
             f"Cannot approve {task_id}. Current verification status: "
             f"{task.verification_status.value.upper()}"
         )
+    # Platform rule: a task cannot be approved while accepted human instructions
+    # are still queued. try_complete_verified_task re-checks this atomically.
+    if pending := storage.pending_message_count(task_id):
+        raise ApprovalError(
+            f"Cannot approve {task_id} while {pending} accepted human instruction(s) "
+            "are still queued for the agent."
+        )
     if not storage.try_complete_verified_task(task_id):
         latest = storage.get_task(task_id)
         status = latest.status.value.upper() if latest else "UNKNOWN"

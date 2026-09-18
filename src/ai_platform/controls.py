@@ -9,22 +9,25 @@ Every control calls the same core method as the CLI command of the same name:
     approve → TaskSessionService.approve         (approval.approve_task)
     reset   → TaskSessionService.reset
 
-This module adds only what an HTTP interface needs: the server-configured actor,
-one place that decides which actions are currently available (the UI renders it),
-idempotency keys for turn-launching actions, and client-safe error messages.
+This module adds only what an HTTP interface needs: role checks for the
+authenticated user, one place that decides which actions are currently available
+(the UI renders it), per-user idempotency keys for turn-launching actions, and
+client-safe error messages.
+
+Correctness across API processes comes only from the database: the core's
+atomic writer lock (start/resume/reject/reset), compare-and-set updates
+(pause/approve) and the event log. There is no in-process lock here.
 """
 
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
-from threading import Lock
 from uuid import NAMESPACE_URL, uuid5
 
 from ai_platform.approval import ApprovalError
-from ai_platform.conversation import ConversationService
+from ai_platform.auth import AuthenticatedUser
 from ai_platform.models import (
     ExecutionKind,
-    MessageStatus,
     TaskRecord,
     TaskStatus,
     VerificationStatus,
@@ -37,7 +40,6 @@ from ai_platform.sessions import (
     TaskNotFoundError,
     TaskSessionError,
     TaskSessionService,
-    TurnOutcome,
 )
 from ai_platform.storage import SQLiteStorage
 
@@ -60,6 +62,13 @@ OWNED = "Another execution currently owns this task."
 
 class ActionConflictError(TaskSessionError):
     """The action is not valid in the task's current state."""
+
+
+class PermissionDeniedError(TaskSessionError):
+    """The authenticated user's role does not allow task mutations."""
+
+
+READ_ONLY = "Read-only access: your role (viewer) cannot change tasks."
 
 
 class RunnerUnavailableError(TaskSessionError):
@@ -90,23 +99,19 @@ class TaskControlService:
         self,
         sessions: TaskSessionService,
         storage: SQLiteStorage,
-        conversation: ConversationService,
         runner: TaskTurnRunner | None,
     ) -> None:
         self.sessions = sessions
         self.storage = storage
-        self.conversation = conversation
         self.runner = runner
-        self._task_locks: dict[str, Lock] = {}
-        self._task_locks_guard = Lock()
 
     # ---- availability (the single decision point the UI renders) ----------
 
-    def availability(self, record: TaskRecord) -> dict[ControlAction, ActionAvailability]:
-        if not self.conversation.messaging_enabled:
-            disabled = ActionAvailability(
-                False, "Browser controls are disabled: AI_PLATFORM_WEB_ACTOR is not configured."
-            )
+    def availability(
+        self, record: TaskRecord, user: AuthenticatedUser
+    ) -> dict[ControlAction, ActionAvailability]:
+        if not user.role.can_modify_tasks:
+            disabled = ActionAvailability(False, READ_ONLY)
             return {action: disabled for action in ControlAction}
         return {action: self._check(action, record) for action in ControlAction}
 
@@ -160,8 +165,11 @@ class TaskControlService:
                 return OWNED
             # Platform rule: a task cannot be approved while accepted human
             # instructions are still queued (approving would orphan them).
-            if pending := self._pending_messages(record.task_id):
-                return f"Wait until {pending} queued chat message(s) have been answered."
+            if pending := self.storage.pending_message_count(record.task_id):
+                return (
+                    f"A task cannot be approved while accepted human instructions are "
+                    f"still queued ({pending})."
+                )
             return None
         if action is ControlAction.REJECT:
             if status is not TaskStatus.WAITING_FOR_HUMAN:
@@ -176,38 +184,44 @@ class TaskControlService:
             return "Task is already in its initial READY state."
         return None
 
-    def _pending_messages(self, task_id: str) -> int:
-        return sum(
-            1
-            for message in self.storage.list_queued_messages(task_id)
-            if message.status in {MessageStatus.QUEUED, MessageStatus.RUNNING}
-        )
-
     # ---- turn-launching actions (async) -----------------------------------
 
-    def start(self, task_id: str, client_action_id: str) -> ControlResult:
+    def start(
+        self, task_id: str, client_action_id: str, user: AuthenticatedUser
+    ) -> ControlResult:
         return self._launch(
             ControlAction.START,
             task_id,
             client_action_id,
+            user,
             lambda human, eid: self.sessions.prepare_start(task_id, human, execution_id=eid),
         )
 
-    def resume(self, task_id: str, client_action_id: str, message: str | None) -> ControlResult:
+    def resume(
+        self,
+        task_id: str,
+        client_action_id: str,
+        message: str | None,
+        user: AuthenticatedUser,
+    ) -> ControlResult:
         return self._launch(
             ControlAction.RESUME,
             task_id,
             client_action_id,
+            user,
             lambda human, eid: self.sessions.prepare_resume(
                 task_id, human, message, execution_id=eid
             ),
         )
 
-    def reject(self, task_id: str, client_action_id: str, message: str) -> ControlResult:
+    def reject(
+        self, task_id: str, client_action_id: str, message: str, user: AuthenticatedUser
+    ) -> ControlResult:
         return self._launch(
             ControlAction.REJECT,
             task_id,
             client_action_id,
+            user,
             lambda human, eid: self.sessions.prepare_reject(
                 task_id, message, human, execution_id=eid
             ),
@@ -218,51 +232,60 @@ class TaskControlService:
         action: ControlAction,
         task_id: str,
         client_action_id: str,
-        prepare: Callable[..., PreparedTurn | TurnOutcome],
+        user: AuthenticatedUser,
+        prepare: Callable[..., PreparedTurn],
     ) -> ControlResult:
-        human = self.conversation.web_identity()
+        self._authorize(user)
+        human = user.human
         task = self.sessions.get_definition(task_id)
-        # Deterministic per (task, action, key): a retry maps to the same execution.
-        execution_id = str(uuid5(_IDEMPOTENCY_NAMESPACE, f"{task.id}:{action}:{client_action_id}"))
-        with self._task_lock(task.id):
-            if self.storage.execution_recorded(task.id, execution_id):
-                return ControlResult(
-                    action, task.id, True, execution_id, client_action_id, duplicate=True
-                )
-            if self.runner is None:
-                raise RunnerUnavailableError(self._check(action, self._record(task.id)).reason)
-            self._require(action, task.id)
+        # Deterministic per (task, user, action, key): only the SAME user's retry maps
+        # to the same execution; another user's identical key is a different request.
+        execution_id = str(
+            uuid5(
+                _IDEMPOTENCY_NAMESPACE,
+                f"{task.id}:{user.user_id}:{action}:{client_action_id}",
+            )
+        )
+        duplicate = ControlResult(
+            action, task.id, True, execution_id, client_action_id, duplicate=True
+        )
+        if self.storage.execution_recorded(task.id, execution_id):
+            return duplicate
+        if self.runner is None:
+            raise RunnerUnavailableError(self._check(action, self._record(task.id)).reason)
+        self._require(action, task.id)
+        try:
             prepared = self._core(lambda: prepare(human, execution_id))
-            if isinstance(prepared, TurnOutcome):
-                # Only reject can get here: feedback recorded, another writer won the lock.
-                raise ActionConflictError(f"{OWNED} The rejection feedback was recorded.")
-            self.runner.run_prepared_turn(prepared)
+        except ActionConflictError:
+            # A concurrent copy of this same request (e.g. through another API process)
+            # may have won the writer lock with this execution ID: that is a retry.
+            if self.storage.execution_recorded(task.id, execution_id):
+                return duplicate
+            raise
+        self.runner.run_prepared_turn(prepared)
         return ControlResult(action, task.id, True, execution_id, client_action_id)
 
     # ---- quick state actions (sync) ---------------------------------------
 
-    def pause(self, task_id: str) -> ControlResult:
-        human = self.conversation.web_identity()
+    def pause(self, task_id: str, user: AuthenticatedUser) -> ControlResult:
+        self._authorize(user)
         task = self.sessions.get_definition(task_id)
-        with self._task_lock(task.id):
-            self._require(ControlAction.PAUSE, task.id)
-            deferred = self._core(lambda: self.sessions.pause(task.id, human))
+        self._require(ControlAction.PAUSE, task.id)
+        deferred = self._core(lambda: self.sessions.pause(task.id, user.human))
         return ControlResult(ControlAction.PAUSE, task.id, False, deferred=deferred)
 
-    def approve(self, task_id: str) -> ControlResult:
-        human = self.conversation.web_identity()
+    def approve(self, task_id: str, user: AuthenticatedUser) -> ControlResult:
+        self._authorize(user)
         task = self.sessions.get_definition(task_id)
-        with self._task_lock(task.id):
-            self._require(ControlAction.APPROVE, task.id)
-            self._core(lambda: self.sessions.approve(task.id, human))
+        self._require(ControlAction.APPROVE, task.id)
+        self._core(lambda: self.sessions.approve(task.id, user.human))
         return ControlResult(ControlAction.APPROVE, task.id, False)
 
-    def reset(self, task_id: str) -> ControlResult:
-        human = self.conversation.web_identity()
+    def reset(self, task_id: str, user: AuthenticatedUser) -> ControlResult:
+        self._authorize(user)
         task = self.sessions.get_definition(task_id)
-        with self._task_lock(task.id):
-            self._require(ControlAction.RESET, task.id)
-            self._core(lambda: self.sessions.reset(task.id, human))
+        self._require(ControlAction.RESET, task.id)
+        self._core(lambda: self.sessions.reset(task.id, user.human))
         return ControlResult(ControlAction.RESET, task.id, False)
 
     # ---- helpers ----------------------------------------------------------
@@ -288,8 +311,7 @@ class TaskControlService:
         except (TaskSessionError, ApprovalError) as error:
             raise ActionConflictError(str(error)) from error
 
-    def _task_lock(self, task_id: str) -> Lock:
-        """Serialize this process's control requests per task (double clicks, retries)."""
-
-        with self._task_locks_guard:
-            return self._task_locks.setdefault(task_id, Lock())
+    @staticmethod
+    def _authorize(user: AuthenticatedUser) -> None:
+        if not user.role.can_modify_tasks:
+            raise PermissionDeniedError(READ_ONLY)

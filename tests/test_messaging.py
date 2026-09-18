@@ -8,7 +8,9 @@ import json
 import queue
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
+from contextlib import asynccontextmanager
+from datetime import timedelta
 from pathlib import Path
 
 import httpx
@@ -17,6 +19,8 @@ import uvicorn
 
 from ai_platform.api.app import create_app
 from ai_platform.application import ApplicationContext, create_application_context
+from ai_platform.approval import ApprovalError
+from ai_platform.auth import Role
 from ai_platform.config import Settings
 from ai_platform.events import ActorType, Event, EventType
 from ai_platform.executors.base import ExecutionRequest, ExecutionResult
@@ -80,7 +84,6 @@ def _settings(tmp_path: Path, **overrides: object) -> Settings:
         max_attempts_per_tier=1,
         lock_heartbeat_seconds=1,
         lock_stale_seconds=10,
-        web_actor=WEB_ACTOR,
     )
     return dataclasses.replace(settings, **overrides)
 
@@ -103,8 +106,31 @@ def _waiting_for_human(context: ApplicationContext, task_id: str = "DEMO-1") -> 
     assert context.storage.get_task(task_id).status is TaskStatus.WAITING_FOR_HUMAN
 
 
-def _client(app) -> httpx.AsyncClient:
-    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test")
+def provision(app, username: str = WEB_ACTOR, role: Role = Role.DEVELOPER) -> str:
+    """Create the user if needed and return a fresh login token (real AuthService)."""
+
+    auth = app.state.auth
+    if username not in {user.username for user in auth.list_users()}:
+        auth.add_user(username, username.title(), role)
+    return auth.create_token(username).secret
+
+
+@asynccontextmanager
+async def _client(
+    app, username: str = WEB_ACTOR, role: Role = Role.DEVELOPER
+) -> AsyncIterator[httpx.AsyncClient]:
+    """An HTTP client logged in through POST /api/auth/login (session cookie)."""
+
+    token = provision(app, username, role)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        login = await client.post("/api/auth/login", json={"username": username, "token": token})
+        assert login.status_code == 200, login.text
+        yield client
+
+
+def _web_human() -> HumanIdentity:
+    return HumanIdentity(actor_id=WEB_ACTOR, display_name=WEB_ACTOR.title())
 
 
 def _post(client: httpx.AsyncClient, task_id: str, message: str, key: str, **extra: object):
@@ -246,19 +272,19 @@ async def test_submission_errors_are_intentional(tmp_path: Path) -> None:
 
 
 @pytest.mark.anyio
-async def test_messaging_disabled_without_configured_web_actor(tmp_path: Path) -> None:
-    context = _context(tmp_path, web_actor=None)
+async def test_viewer_cannot_send_messages(tmp_path: Path) -> None:
+    context = _context(tmp_path)
     _waiting_for_human(context)
 
-    async with _client(create_app(context)) as client:
+    async with _client(create_app(context), "watcher", Role.VIEWER) as client:
         response = await _post(client, "DEMO-1", "hi", "key-disabled")
-        config = (await client.get("/api/config")).json()
         detail = (await client.get("/api/tasks/DEMO-1")).json()
+        messages = await client.get("/api/tasks/DEMO-1/messages")
 
-    assert response.status_code == 503
-    assert "AI_PLATFORM_WEB_ACTOR" in response.json()["detail"]
-    assert config["messaging_enabled"] is False and config["web_actor"] is None
+    assert response.status_code == 403
+    assert "Read-only" in response.json()["detail"]
     assert detail["messaging"]["accepting"] is False
+    assert messages.status_code == 200  # viewers can read
     assert _events(context, "DEMO-1", EventType.HUMAN_MESSAGE) == []
 
 
@@ -410,25 +436,38 @@ def test_queued_message_fails_cleanly_when_task_is_no_longer_continuable(
 ) -> None:
     context = _context(tmp_path)
     _waiting_for_human(context)
-    submitted = create_app(context).state.conversation.submit("DEMO-1", "late", "key-late-01")
-    context.sessions.approve("DEMO-1", HumanIdentity(actor_id="cli-user", display_name="cli-user"))
+    submitted = create_app(context).state.conversation.submit(
+        "DEMO-1", "late", "key-late-01", _web_human()
+    )
+    cli_user = HumanIdentity(actor_id="cli-user", display_name="cli-user")
+    # Platform rule: approving would orphan the queued instruction, so it is refused
+    # (also from the CLI) ...
+    with pytest.raises(ApprovalError, match="still queued"):
+        context.sessions.approve("DEMO-1", cli_user)
+    # ... but a reset can still take the task out of its continuable state.
+    context.sessions.reset("DEMO-1", cli_user)
 
     TaskTurnRunner(context.sessions, context.storage).run_pending()
 
     message = context.storage.list_queued_messages("DEMO-1")[0]
     assert message.message_id == submitted.message.message_id
     assert message.status is MessageStatus.FAILED
-    assert "COMPLETED" in message.error
+    assert "READY" in message.error
 
 
 def test_runner_fails_messages_interrupted_by_a_process_stop(tmp_path: Path) -> None:
     context = _context(tmp_path)
     _waiting_for_human(context)
-    create_app(context).state.conversation.submit("DEMO-1", "interrupted", "key-interrupt")
+    create_app(context).state.conversation.submit(
+        "DEMO-1", "interrupted", "key-interrupt", _web_human()
+    )
     claimed = context.storage.claim_next_message("DEMO-1", "dead-execution")
     assert claimed is not None and claimed.status is MessageStatus.RUNNING
 
-    failed = TaskTurnRunner(context.sessions, context.storage).fail_interrupted_messages()
+    runner = TaskTurnRunner(context.sessions, context.storage)
+    assert runner.fail_interrupted_messages() == []  # a fresh claim may be another process's
+    runner.interrupt_grace = timedelta(0)
+    failed = runner.fail_interrupted_messages()
 
     assert failed == [claimed.message_id]
     assert _statuses(context) == [MessageStatus.FAILED]
@@ -502,7 +541,9 @@ async def test_absolute_workspace_paths_are_redacted(tmp_path: Path) -> None:
 async def test_new_get_endpoints_do_not_mutate_state(tmp_path: Path) -> None:
     context = _context(tmp_path)
     _waiting_for_human(context)
-    create_app(context).state.conversation.submit("DEMO-1", "queued", "key-readonly")
+    create_app(context).state.conversation.submit(
+        "DEMO-1", "queued", "key-readonly", _web_human()
+    )
     before = (
         context.sessions.list_tasks(),
         context.storage.get_events("DEMO-1"),
@@ -542,11 +583,20 @@ def live_server(tmp_path: Path) -> Iterator[tuple[str, ApplicationContext]]:
     thread.start()
     _wait_for(lambda: server.started, timeout=10)
     port = server.servers[0].sockets[0].getsockname()[1]
+    base = f"http://127.0.0.1:{port}"
+    token = provision(app)
+    login = httpx.post(f"{base}/api/auth/login", json={"username": WEB_ACTOR, "token": token})
+    assert login.status_code == 200
+    SSE_COOKIES.clear()
+    SSE_COOKIES.update(login.cookies)
     try:
-        yield f"http://127.0.0.1:{port}", context
+        yield base, context
     finally:
         server.should_exit = True
         thread.join(timeout=10)
+
+
+SSE_COOKIES: dict[str, str] = {}
 
 
 def _read_sse(
@@ -560,7 +610,7 @@ def _read_sse(
     frames: list[dict] = []
     raw: list[str] = []
     current: dict = {}
-    with httpx.stream("GET", url, headers=headers, timeout=10) as response:
+    with httpx.stream("GET", url, headers=headers, cookies=SSE_COOKIES, timeout=10) as response:
         assert response.status_code == 200
         assert response.headers["content-type"].startswith("text/event-stream")
         for line in response.iter_lines():
@@ -662,23 +712,37 @@ async def test_sse_rejects_unknown_task_and_bad_cursor(tmp_path: Path) -> None:
     assert bad.status_code == 422
 
 
-def test_web_actor_and_runner_configuration(
+def test_runner_and_session_configuration(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    for name in ("AI_PLATFORM_WEB_ACTOR", "AI_PLATFORM_ENABLE_RUNNER"):
+    for name in (
+        "AI_PLATFORM_ENABLE_RUNNER",
+        "AI_PLATFORM_SESSION_HOURS",
+        "AI_PLATFORM_COOKIE_SECURE",
+        "AI_PLATFORM_ALLOWED_ORIGINS",
+    ):
         monkeypatch.delenv(name, raising=False)
     defaults = Settings.from_env(tmp_path)
-    assert defaults.web_actor is None and defaults.enable_runner is False
+    assert defaults.enable_runner is False
+    assert (defaults.session_hours, defaults.cookie_secure, defaults.allowed_origins) == (
+        12,
+        False,
+        (),
+    )
 
-    monkeypatch.setenv("AI_PLATFORM_WEB_ACTOR", " vakho ")
     monkeypatch.setenv("AI_PLATFORM_ENABLE_RUNNER", "yes")
+    monkeypatch.setenv("AI_PLATFORM_SESSION_HOURS", "8")
+    monkeypatch.setenv("AI_PLATFORM_COOKIE_SECURE", "1")
+    monkeypatch.setenv("AI_PLATFORM_ALLOWED_ORIGINS", "https://ai.example.com/")
     configured = Settings.from_env(tmp_path)
-    assert configured.web_actor == "vakho" and configured.enable_runner is True
+    assert configured.enable_runner is True and configured.session_hours == 8
+    assert configured.cookie_secure is True
+    assert configured.allowed_origins == ("https://ai.example.com",)
 
-    monkeypatch.setenv("AI_PLATFORM_WEB_ACTOR", "root\nadmin")
-    with pytest.raises(ValueError, match="AI_PLATFORM_WEB_ACTOR"):
-        Settings.from_env(tmp_path)
-    monkeypatch.setenv("AI_PLATFORM_WEB_ACTOR", "vakho")
     monkeypatch.setenv("AI_PLATFORM_ENABLE_RUNNER", "maybe")
     with pytest.raises(ValueError, match="AI_PLATFORM_ENABLE_RUNNER"):
+        Settings.from_env(tmp_path)
+    monkeypatch.setenv("AI_PLATFORM_ENABLE_RUNNER", "0")
+    monkeypatch.setenv("AI_PLATFORM_ALLOWED_ORIGINS", "*")
+    with pytest.raises(ValueError, match="AI_PLATFORM_ALLOWED_ORIGINS"):
         Settings.from_env(tmp_path)

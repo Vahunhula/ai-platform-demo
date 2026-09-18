@@ -7,8 +7,11 @@ recovery design as a hosted multi-user SSH demonstration.
 Demo 2 adds a FastAPI interface and React/TypeScript UI without replacing that
 core: Phase 1 is a read-only task view; Phase 2 adds durable browser messaging
 that continues the same TaskSession, a background turn runner, and live updates
-over SSE. See [docs/demo2-ui.md](docs/demo2-ui.md) for architecture, API
-contracts, development commands, and current limitations.
+over SSE; Phase 3 adds the task lifecycle controls; Phase 4 adds authenticated
+multi-user collaboration (CLI-provisioned users and tokens, roles, presence) with
+database-enforced correctness across API processes. See
+[docs/demo2-ui.md](docs/demo2-ui.md) for architecture, API contracts, development
+commands, and current limitations.
 
 The central rule is:
 

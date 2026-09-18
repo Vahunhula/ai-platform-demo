@@ -16,10 +16,14 @@ Correctness does not depend on this process's memory:
   takes the existing one-writer workspace lock. If the lock is not available the
   claim is returned to the queue.
 
-Run at most one runner-enabled API process per runtime.
+Several runner-enabled API processes may share one runtime: each queue row is
+claimed by exactly one of them (atomic SQL), each task has at most one writer
+(the core lock), and a RUNNING claim is only declared interrupted after a grace
+period, so one process never fails a claim another process made a moment ago.
 """
 
 import logging
+from datetime import UTC, datetime, timedelta
 from threading import Event as ThreadEvent
 from threading import Lock, Thread
 from uuid import uuid4
@@ -52,10 +56,18 @@ class TaskTurnRunner:
         storage: SQLiteStorage,
         *,
         poll_interval_seconds: float = 1.0,
+        interrupt_grace: timedelta | None = None,
     ) -> None:
         self.sessions = sessions
         self.storage = storage
         self.poll_interval_seconds = poll_interval_seconds
+        # A claim is only "interrupted" once it is older than this and its task lock
+        # is not held by it. Defaults to the core's stale-lock threshold.
+        self.interrupt_grace = (
+            interrupt_grace
+            if interrupt_grace is not None
+            else timedelta(seconds=sessions.settings.lock_stale_seconds)
+        )
         self._wake = ThreadEvent()
         self._stopping = ThreadEvent()
         self._in_flight: set[str] = set()
@@ -150,13 +162,18 @@ class TaskTurnRunner:
         return self._run_turn(message, execution_id)
 
     def fail_interrupted_messages(self) -> list[str]:
-        """Fail RUNNING messages whose turn no longer holds the task's writer lock."""
+        """Fail RUNNING messages whose turn no longer holds the task's writer lock.
+
+        Only claims older than ``interrupt_grace`` qualify: a fresh claim may belong
+        to another process that has not acquired the writer lock yet.
+        """
 
         failed: list[str] = []
         with self._in_flight_lock:
             in_flight = set(self._in_flight) | set(self._control_turns)
+        cutoff = datetime.now(UTC) - self.interrupt_grace
         for message in self.storage.running_messages():
-            if message.task_id in in_flight:
+            if message.task_id in in_flight or message.updated_at > cutoff:
                 continue
             record = self.storage.get_task(message.task_id)
             if record is not None and record.execution_id == message.execution_id:

@@ -73,6 +73,13 @@ class SQLiteStorage:
             ensure_group_writable_sqlite_files(self.db_path)
             connection.close()
 
+    @contextmanager
+    def transaction(self, *, immediate: bool = False) -> Iterator[sqlite3.Connection]:
+        """Open one short transaction on the shared database (used by companion stores)."""
+
+        with self._connect(immediate=immediate) as connection:
+            yield connection
+
     def initialize(self) -> None:
         """Create or migrate the shared database and enable practical concurrency."""
 
@@ -144,32 +151,14 @@ class SQLiteStorage:
             )
             # Demo 2: delivery state for browser messages. Message content is never
             # stored here; it is the referenced HUMAN_MESSAGE event.
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS message_queue (
-                    message_id TEXT PRIMARY KEY,
-                    task_id TEXT NOT NULL,
-                    client_message_id TEXT NOT NULL,
-                    event_sequence_id INTEGER NOT NULL UNIQUE,
-                    actor_id TEXT NOT NULL,
-                    display_name TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    execution_id TEXT,
-                    error TEXT,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    UNIQUE (task_id, client_message_id),
-                    FOREIGN KEY (task_id) REFERENCES tasks(task_id),
-                    FOREIGN KEY (event_sequence_id) REFERENCES events(sequence_id)
-                )
-                """
-            )
+            self._create_or_migrate_message_queue(connection)
             connection.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_message_queue_task_status
                 ON message_queue(task_id, status, event_sequence_id)
                 """
             )
+            self._create_auth_tables(connection)
 
     def create_task(self, task: TaskDefinition) -> bool:
         """Create initial runtime state, returning whether a row was inserted."""
@@ -248,16 +237,21 @@ class SQLiteStorage:
 
         self._update_task_field(task_id, "verification_status", status.value)
 
-    def reset_task_runtime(self, task_id: str) -> None:
-        """Reset mutable runtime fields while preserving append-only history."""
+    def reset_task_runtime(self, task_id: str, owner: str | None = None) -> None:
+        """Reset mutable runtime fields while preserving append-only history.
+
+        With ``owner``, the caller holds the task's writer lock for the reset; the
+        reset and the lock release happen in this one atomic update.
+        """
 
         with self._connect(immediate=True) as connection:
             row = connection.execute(
-                "SELECT active_execution FROM tasks WHERE task_id = ?", (task_id,)
+                "SELECT active_execution, execution_owner FROM tasks WHERE task_id = ?",
+                (task_id,),
             ).fetchone()
             if row is None:
                 raise KeyError(task_id)
-            if row["active_execution"]:
+            if row["active_execution"] and (owner is None or row["execution_owner"] != owner):
                 raise RuntimeError(f"{task_id} currently has an active workspace writer")
             connection.execute(
                 """
@@ -502,18 +496,27 @@ class SQLiteStorage:
             )
             return (previous, current) if previous is not current else None
 
-    def request_pause(self, task_id: str) -> PauseResult:
-        """Atomically pause now or set a cooperative request for the active agent."""
+    def request_pause(self, task_id: str) -> PauseResult | None:
+        """Atomically pause now or set a cooperative request for the active agent.
+
+        Returns ``None`` (and changes nothing) when a concurrent request already
+        paused the task or already requested the pause.
+        """
 
         with self._connect(immediate=True) as connection:
             row = connection.execute(
-                "SELECT status, active_execution FROM tasks WHERE task_id = ?", (task_id,)
+                "SELECT status, active_execution, pause_requested FROM tasks WHERE task_id = ?",
+                (task_id,),
             ).fetchone()
             if row is None:
                 raise KeyError(task_id)
             previous = TaskStatus(row["status"])
             active = ExecutionKind(row["active_execution"]) if row["active_execution"] else None
             deferred = active is ExecutionKind.AGENT
+            if bool(row["pause_requested"]) or (
+                previous is TaskStatus.PAUSED_BY_HUMAN and not deferred
+            ):
+                return None
             current = previous if deferred else TaskStatus.PAUSED_BY_HUMAN
             connection.execute(
                 """
@@ -544,6 +547,10 @@ class SQLiteStorage:
                 SET status = ?, updated_at = ?
                 WHERE task_id = ? AND status = ? AND verification_status = ?
                   AND active_execution IS NULL
+                  AND NOT EXISTS (
+                      SELECT 1 FROM message_queue
+                      WHERE message_queue.task_id = tasks.task_id AND status IN (?, ?)
+                  )
                 """,
                 (
                     TaskStatus.COMPLETED.value,
@@ -551,9 +558,21 @@ class SQLiteStorage:
                     task_id,
                     TaskStatus.WAITING_FOR_HUMAN.value,
                     VerificationStatus.PASSED.value,
+                    MessageStatus.QUEUED.value,
+                    MessageStatus.RUNNING.value,
                 ),
             )
             return cursor.rowcount == 1
+
+    def pending_message_count(self, task_id: str) -> int:
+        """Return accepted browser instructions not yet answered (QUEUED or RUNNING)."""
+
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) FROM message_queue WHERE task_id = ? AND status IN (?, ?)",
+                (task_id, MessageStatus.QUEUED.value, MessageStatus.RUNNING.value),
+            ).fetchone()
+        return int(row[0])
 
     def get_event(self, task_id: str, sequence_id: int) -> Event | None:
         """Return one event of a task by its durable sequence number."""
@@ -592,21 +611,34 @@ class SQLiteStorage:
         message_id: str,
         client_message_id: str,
         display_name: str,
-    ) -> tuple[QueuedMessage, bool]:
+        accepting_statuses: Iterable[TaskStatus] | None = None,
+    ) -> tuple[QueuedMessage, bool] | None:
         """Append a HUMAN_MESSAGE and its queue entry atomically, once per client key.
 
-        Returns the stored entry and whether this call created it. A retried request
-        with the same (task_id, client_message_id) returns the original entry and
-        appends nothing.
+        The key is scoped to the author: (task_id, actor_id, client_message_id).
+        Returns the stored entry and whether this call created it; a retry returns
+        the original entry and appends nothing. Returns ``None`` (nothing written)
+        when ``accepting_statuses`` is given and the task is not in one of them —
+        checked in the same transaction, so no concurrent approve/reset can slip in.
         """
 
         with self._connect(immediate=True) as connection:
             existing = connection.execute(
-                "SELECT * FROM message_queue WHERE task_id = ? AND client_message_id = ?",
-                (event.task_id, client_message_id),
+                """
+                SELECT * FROM message_queue
+                WHERE task_id = ? AND actor_id = ? AND client_message_id = ?
+                """,
+                (event.task_id, event.actor_id, client_message_id),
             ).fetchone()
             if existing is not None:
                 return self._queued_message_from_row(existing), False
+            if accepting_statuses is not None:
+                row = connection.execute(
+                    "SELECT status FROM tasks WHERE task_id = ?", (event.task_id,)
+                ).fetchone()
+                allowed = {status.value for status in accepting_statuses}
+                if row is None or row["status"] not in allowed:
+                    return None
             self._insert_event(connection, event)
             now = datetime.now(UTC).isoformat()
             connection.execute(
@@ -633,13 +665,18 @@ class SQLiteStorage:
             ).fetchone()
         return self._queued_message_from_row(row), True
 
-    def get_queued_message(self, task_id: str, client_message_id: str) -> QueuedMessage | None:
-        """Return the delivery record for one idempotency key, if it exists."""
+    def get_queued_message(
+        self, task_id: str, actor_id: str, client_message_id: str
+    ) -> QueuedMessage | None:
+        """Return the delivery record for one author's idempotency key, if it exists."""
 
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT * FROM message_queue WHERE task_id = ? AND client_message_id = ?",
-                (task_id, client_message_id),
+                """
+                SELECT * FROM message_queue
+                WHERE task_id = ? AND actor_id = ? AND client_message_id = ?
+                """,
+                (task_id, actor_id, client_message_id),
             ).fetchone()
         return self._queued_message_from_row(row) if row else None
 
@@ -879,6 +916,106 @@ class SQLiteStorage:
         for column, statement in migrations.items():
             if column not in columns:
                 connection.execute(statement)
+
+    @staticmethod
+    def _create_or_migrate_message_queue(connection: sqlite3.Connection) -> None:
+        """Create message_queue, or rebuild a Phase 2 table to scope keys per author.
+
+        Phase 2 made (task_id, client_message_id) unique; Phase 4 scopes it to
+        (task_id, actor_id, client_message_id). SQLite cannot drop a table
+        constraint, so a Phase 2 table is copied row for row into the new shape in
+        this same transaction. Every Phase 2 row already stores its author in
+        ``actor_id``, so nothing needs backfilling. Runs once: afterwards the
+        table's SQL already contains the new constraint.
+        """
+
+        columns = """
+            message_id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL,
+            client_message_id TEXT NOT NULL,
+            event_sequence_id INTEGER NOT NULL UNIQUE,
+            actor_id TEXT NOT NULL,
+            display_name TEXT NOT NULL,
+            status TEXT NOT NULL,
+            execution_id TEXT,
+            error TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE (task_id, actor_id, client_message_id),
+            FOREIGN KEY (task_id) REFERENCES tasks(task_id),
+            FOREIGN KEY (event_sequence_id) REFERENCES events(sequence_id)
+        """
+        existing = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'message_queue'"
+        ).fetchone()
+        if existing is None:
+            connection.execute(f"CREATE TABLE message_queue ({columns})")
+            return
+        if "UNIQUE (task_id, actor_id, client_message_id)" in existing[0]:
+            return
+        names = (
+            "message_id, task_id, client_message_id, event_sequence_id, actor_id, "
+            "display_name, status, execution_id, error, created_at, updated_at"
+        )
+        connection.execute("DROP TABLE IF EXISTS message_queue_phase4_migration")
+        connection.execute(f"CREATE TABLE message_queue_phase4_migration ({columns})")
+        connection.execute(
+            f"INSERT INTO message_queue_phase4_migration ({names}) "
+            f"SELECT {names} FROM message_queue"
+        )
+        connection.execute("DROP TABLE message_queue")
+        connection.execute("ALTER TABLE message_queue_phase4_migration RENAME TO message_queue")
+
+    @staticmethod
+    def _create_auth_tables(connection: sqlite3.Connection) -> None:
+        """Demo 2 Phase 4: web users, hashed access tokens and sessions, presence."""
+
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                user_id TEXT PRIMARY KEY,
+                username TEXT NOT NULL UNIQUE,
+                display_name TEXT NOT NULL,
+                role TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS auth_tokens (
+                token_id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL REFERENCES users(user_id),
+                token_hash TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL,
+                revoked_at TEXT
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS web_sessions (
+                session_id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL REFERENCES users(user_id),
+                token_id TEXT NOT NULL REFERENCES auth_tokens(token_id),
+                session_hash TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                revoked_at TEXT
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS task_presence (
+                task_id TEXT NOT NULL,
+                user_id TEXT NOT NULL REFERENCES users(user_id),
+                last_seen TEXT NOT NULL,
+                PRIMARY KEY (task_id, user_id)
+            )
+            """
+        )
 
     @staticmethod
     def _create_or_migrate_events(connection: sqlite3.Connection) -> None:

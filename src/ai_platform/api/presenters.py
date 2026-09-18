@@ -11,7 +11,9 @@ through this module, which applies two layers:
 """
 
 import re
+from collections.abc import Callable
 from pathlib import Path
+from time import monotonic
 from typing import Any
 
 from ai_platform.api.schemas import (
@@ -24,8 +26,9 @@ from ai_platform.api.schemas import (
     TaskListItem,
     VerificationResultResponse,
 )
+from ai_platform.auth import AuthenticatedUser
 from ai_platform.config import Settings
-from ai_platform.controls import ActionAvailability, ControlAction
+from ai_platform.controls import READ_ONLY, ActionAvailability, ControlAction
 from ai_platform.conversation import ConversationEntry, ConversationService
 from ai_platform.events import Event, EventType
 from ai_platform.models import (
@@ -144,8 +147,30 @@ class PathRedactor:
 class Presenter:
     """Build public response models from core objects."""
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        display_names: Callable[[], dict[str, str]] | None = None,
+    ) -> None:
         self.redactor = PathRedactor(settings)
+        self._load_names = display_names or dict
+        self._names: dict[str, str] = {}
+        self._names_loaded_at = float("-inf")
+
+    def _display_name(self, event: Event) -> str:
+        """Name recorded with the event; else the provisioned user's current name.
+
+        Historical events are never rewritten and ``actor_id`` is always returned
+        alongside, so auditability never depends on a mutable display name.
+        """
+
+        recorded = event.metadata.get("display_name")
+        if isinstance(recorded, str) and recorded.strip():
+            return recorded
+        if monotonic() - self._names_loaded_at > 5:
+            self._names = self._load_names()
+            self._names_loaded_at = monotonic()
+        return self._names.get(event.actor_id, event.actor_id)
 
     def public_metadata(self, event: Event) -> dict[str, Any]:
         metadata = {
@@ -164,6 +189,7 @@ class Presenter:
             event_type=event.event_type.value,
             actor_type=event.actor_type.value,
             actor_id=event.actor_id,
+            actor_display_name=self._display_name(event),
             execution_id=event.metadata.get("execution_id"),
             metadata=self.public_metadata(event),
         )
@@ -176,6 +202,7 @@ class Presenter:
             task_id=event.task_id,
             role="human" if is_human else "agent",
             actor_id=event.actor_id,
+            actor_display_name=self._display_name(event),
             content=self.redactor.text(str(event.metadata.get("message", ""))),
             timestamp=event.timestamp,
             sequence_id=event.sequence_id or 0,
@@ -201,14 +228,14 @@ class Presenter:
     def task_detail(
         self,
         session: TaskSession,
-        conversation: ConversationService,
+        user: AuthenticatedUser,
         queued_messages: int,
         actions: dict[ControlAction, ActionAvailability],
     ) -> TaskDetailResponse:
         record = session.record
-        reason = conversation.acceptance(record)
-        if not conversation.messaging_enabled:
-            reason = "Browser messaging is disabled on this server (no web actor configured)."
+        reason = ConversationService.acceptance(record)
+        if not user.role.can_modify_tasks:
+            reason = READ_ONLY
         return TaskDetailResponse(
             **self.task_item(session.definition, record).model_dump(),
             description=session.definition.description,

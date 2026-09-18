@@ -1,6 +1,8 @@
 """Thin Typer/Rich client for the shared TaskSession application service."""
 
 import json
+from collections.abc import Callable
+from datetime import timedelta
 from pathlib import Path
 
 import typer
@@ -12,6 +14,7 @@ from rich.table import Table
 
 from ai_platform.application import ApplicationContext, create_application_context
 from ai_platform.approval import ApprovalError
+from ai_platform.auth import AuthService, Role, UserManagementError
 from ai_platform.config import Settings
 from ai_platform.doctor import CheckStatus, inspect_environment
 from ai_platform.events import ActorType, Event
@@ -209,6 +212,123 @@ def trace(task_id: str) -> None:
             _format_metadata(event.metadata, 500),
         )
     console.print(table)
+
+
+users_app = typer.Typer(no_args_is_help=True, help="Manage web users (Demo 2 authentication).")
+tokens_app = typer.Typer(no_args_is_help=True, help="Issue and revoke web login access tokens.")
+app.add_typer(users_app, name="users")
+app.add_typer(tokens_app, name="auth-token")
+
+
+def _auth_service() -> AuthService:
+    context = _application_context()
+    return AuthService(
+        context.storage, session_ttl=timedelta(hours=context.settings.session_hours)
+    )
+
+
+def _auth_call[T](operation: Callable[[], T]) -> T:
+    try:
+        return operation()
+    except UserManagementError as error:
+        _exit_with_error(error)
+        raise  # unreachable; keeps type checkers honest
+
+
+@users_app.command("list")
+def users_list() -> None:
+    """List web users (never tokens or hashes)."""
+
+    table = Table(show_header=True, header_style="bold cyan")
+    for column in ("USERNAME", "DISPLAY NAME", "ROLE", "ENABLED", "CREATED (UTC)"):
+        table.add_column(column)
+    for user in _auth_service().list_users():
+        table.add_row(
+            user.username,
+            escape(user.display_name),
+            user.role.value,
+            "yes" if user.enabled else "no",
+            user.created_at.strftime("%Y-%m-%d %H:%M"),
+        )
+    console.print(table)
+
+
+@users_app.command("add")
+def users_add(
+    username: str = typer.Option(..., "--username", help="Immutable login name / actor ID"),
+    display_name: str = typer.Option(..., "--display-name", help="Name shown in the UI"),
+    role: str = typer.Option("developer", "--role", help="viewer, developer or admin"),
+) -> None:
+    """Provision a web user."""
+
+    try:
+        chosen = Role(role.strip().lower())
+    except ValueError:
+        _exit_with_error(UserManagementError("Role must be viewer, developer or admin"))
+        return
+    user = _auth_call(lambda: _auth_service().add_user(username, display_name, chosen))
+    console.print(f"User [bold]{user.username}[/bold] created with role {user.role.value}.")
+    console.print(f"Issue a login token with: ai-platform auth-token create {user.username}")
+
+
+@users_app.command("disable")
+def users_disable(username: str) -> None:
+    """Block logins and end every existing session of a user (history is kept)."""
+
+    user = _auth_call(lambda: _auth_service().set_enabled(username, False))
+    console.print(f"User {user.username} disabled; existing sessions revoked.")
+
+
+@users_app.command("enable")
+def users_enable(username: str) -> None:
+    """Re-enable a disabled user (they must log in again)."""
+
+    user = _auth_call(lambda: _auth_service().set_enabled(username, True))
+    console.print(f"User {user.username} enabled.")
+
+
+@users_app.command("logout-all")
+def users_logout_all(username: str) -> None:
+    """Revoke every active web session of a user."""
+
+    count = _auth_call(lambda: _auth_service().revoke_sessions(username))
+    console.print(f"Revoked {count} session(s) of {username}.")
+
+
+@tokens_app.command("create")
+def token_create(username: str) -> None:
+    """Issue a login access token. The secret is printed once and never stored."""
+
+    issued = _auth_call(lambda: _auth_service().create_token(username))
+    console.print(f"Token [bold]{issued.token_id}[/bold] created for {issued.username}\n")
+    # Printed plainly (no markup/highlighting) so it can be copied exactly.
+    console.print(issued.secret, markup=False, highlight=False, soft_wrap=True)
+    console.print("\nThis token will not be shown again.")
+
+
+@tokens_app.command("list")
+def token_list() -> None:
+    """List token IDs and their status (never secrets or hashes)."""
+
+    table = Table(show_header=True, header_style="bold cyan")
+    for column in ("TOKEN ID", "USER", "CREATED (UTC)", "STATUS"):
+        table.add_column(column)
+    for token_id, username, created, revoked in _auth_service().list_tokens():
+        table.add_row(
+            token_id,
+            username,
+            created.strftime("%Y-%m-%d %H:%M"),
+            f"revoked {revoked:%Y-%m-%d %H:%M}" if revoked else "active",
+        )
+    console.print(table)
+
+
+@tokens_app.command("revoke")
+def token_revoke(token_id: str) -> None:
+    """Revoke a token: no new logins, and the sessions it created end now."""
+
+    _auth_call(lambda: _auth_service().revoke_token(token_id))
+    console.print(f"Token {token_id} revoked; its sessions ended.")
 
 
 @app.command()

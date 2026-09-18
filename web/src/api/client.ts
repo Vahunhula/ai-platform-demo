@@ -3,15 +3,24 @@ import type {
   ControlRequest,
   ControlResponse,
   ConversationMessage,
+  CurrentUser,
   DiffResponse,
   PlatformEvent,
   PostMessageRequest,
   PostMessageResponse,
+  PresenceResponse,
   TaskDetail,
   TaskListItem,
 } from "../types/api";
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/$/, "");
+
+let onUnauthorized: () => void = () => undefined;
+
+/** Called whenever the server says the session is gone (401): return to login. */
+export function setUnauthorizedHandler(handler: () => void): void {
+  onUnauthorized = handler;
+}
 
 /** An HTTP error with a user-presentable message; `status` is 0 for network failures. */
 export class ApiError extends Error {
@@ -29,6 +38,8 @@ export class ApiError extends Error {
 }
 
 function friendlyMessage(status: number, detail: string | undefined): string {
+  if (status === 401) return detail ?? "Your session has ended. Please sign in again.";
+  if (status === 403) return detail ?? "You do not have permission to do that.";
   if (status >= 500 && status !== 503) return "The server hit an unexpected error. Try again.";
   if (status === 422) return detail && !detail.startsWith("[") ? detail : "The request was invalid.";
   return detail ?? `Request failed (${status}).`;
@@ -42,17 +53,30 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     if (reason instanceof DOMException && reason.name === "AbortError") throw reason;
     throw new ApiError("Could not reach the server. Check the connection and retry.", 0);
   }
+  if (response.status === 401 && !path.startsWith("/api/auth/")) onUnauthorized();
   if (!response.ok) {
     const payload = (await response.json().catch(() => null)) as { detail?: unknown } | null;
     const detail = typeof payload?.detail === "string" ? payload.detail : undefined;
     throw new ApiError(friendlyMessage(response.status, detail), response.status);
   }
+  if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
 }
+
+const post = (body?: unknown): RequestInit => ({
+  method: "POST",
+  headers: body === undefined ? undefined : { "Content-Type": "application/json" },
+  body: body === undefined ? undefined : JSON.stringify(body),
+});
 
 const task = (taskId: string) => `/api/tasks/${encodeURIComponent(taskId)}`;
 
 export const api = {
+  login: (username: string, token: string) =>
+    request<CurrentUser>("/api/auth/login", post({ username, token })),
+  me: (signal?: AbortSignal) => request<CurrentUser>("/api/auth/me", { signal }),
+  logout: () => request<void>("/api/auth/logout", post()),
+  heartbeat: (taskId: string) => request<PresenceResponse>(`${task(taskId)}/presence`, post()),
   getConfig: (signal?: AbortSignal) => request<ConfigResponse>("/api/config", { signal }),
   listTasks: (signal?: AbortSignal) => request<TaskListItem[]>("/api/tasks", { signal }),
   getTask: (taskId: string, signal?: AbortSignal) => request<TaskDetail>(task(taskId), { signal }),

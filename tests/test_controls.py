@@ -13,6 +13,7 @@ import pytest
 
 from ai_platform.api.app import create_app
 from ai_platform.application import ApplicationContext
+from ai_platform.auth import Role
 from ai_platform.events import EventType
 from ai_platform.identity import HumanIdentity
 from ai_platform.models import ExecutionKind, MessageStatus, TaskStatus
@@ -298,7 +299,7 @@ async def test_approve_refused_during_active_turn_and_with_pending_chat(
         h2.executor.gated = False
         h2.runner.stop()
 
-    assert pending.status_code == 409 and "queued chat message" in pending.json()["detail"]
+    assert pending.status_code == 409 and "still queued" in pending.json()["detail"]
     assert h.status() is TaskStatus.WAITING_FOR_HUMAN
     assert during_turn.status_code == 409
     assert during_turn.json()["detail"] == (
@@ -392,14 +393,23 @@ async def test_backend_reports_action_availability_per_state(harness: Harness) -
 
 
 @pytest.mark.anyio
-async def test_controls_disabled_without_web_actor_and_runner(tmp_path: Path) -> None:
-    no_actor = Harness(tmp_path / "a", web_actor=None)
-    async with _client(no_actor.app) as client:
+async def test_viewer_is_read_only_and_runner_is_required(tmp_path: Path) -> None:
+    viewer = Harness(tmp_path / "a")
+    _waiting_for_human(viewer.context)
+    async with _client(viewer.app, "watcher", Role.VIEWER) as client:
         detail = (await client.get("/api/tasks/DEMO-1")).json()
-        start = await _act(client, "start", client_action_id=KEY)
+        responses = [
+            await _act(client, "start", client_action_id=KEY),
+            await _act(client, "pause"),
+            await _act(client, "approve"),
+            await _act(client, "reject", client_action_id=KEY, message="no"),
+            await _act(client, "resume", client_action_id=KEY),
+            await _act(client, "reset", confirm=True),
+        ]
     assert _allowed(detail) == set()
-    assert "AI_PLATFORM_WEB_ACTOR" in detail["actions"]["start"]["reason"]
-    assert start.status_code == 503
+    assert detail["actions"]["approve"]["reason"].startswith("Read-only access")
+    assert [response.status_code for response in responses] == [403] * 6
+    assert viewer.status() is TaskStatus.WAITING_FOR_HUMAN
 
     context = _context(tmp_path / "b", FakeAgentExecutor())
     async with _client(create_app(context)) as client:  # runner disabled

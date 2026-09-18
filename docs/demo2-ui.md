@@ -1,4 +1,4 @@
-# Demo 2 — Web UI (Phases 1–3)
+# Demo 2 — Web UI (Phases 1–4)
 
 Demo 2 adds a browser interface to the proven Demo 1 platform without replacing
 its task lifecycle, storage, workspace, routing, executor, or LangGraph code.
@@ -11,6 +11,10 @@ its task lifecycle, storage, workspace, routing, executor, or LangGraph code.
 - **Phase 3** (`demo2-phase3`): task lifecycle controls in the browser — start,
   pause, resume, approve, reject, reset — through the same core methods as the
   CLI commands of the same names. Shell/terminal stays CLI/SSH-only.
+- **Phase 4** (`demo2-phase4`): real multi-user identity — CLI-provisioned users
+  and access tokens, HttpOnly session cookies, viewer/developer/admin roles,
+  per-user attribution and idempotency, presence, and database-enforced
+  correctness across several API processes and runners.
 
 **The Platform Core remains the source of truth. The API is an interface layer.
 The React UI is a presentation layer.**
@@ -59,6 +63,26 @@ TaskSessionService ─┤          ai-platform pause|approve|reset → same meth
 
 Chat uses the Phase 2 path: the CLI's `message` and the browser runner both
 end in `continue_conversation()`.
+
+With Phase 4, several people share one TaskSession, possibly through several
+API processes:
+
+```text
+Browser A (Vakho) ─┐
+                   │
+Browser B (Alex) ──┼── FastAPI process(es) ── 127.0.0.1, SSH tunnel
+                   │      │
+Browser C (An) ────┘      ├── AuthService        session cookie → AuthenticatedUser
+                          ├── ConversationService (author = session user)
+                          ├── TaskControlService  (actor = session user, role-checked)
+                          └── SSE / Presence
+                                  │
+                                  ▼
+                   TaskSession (one per task, shared by everyone)
+                                  │
+                                  ▼
+                   writer lock → LangGraph → Agent → shared task workspace
+```
 
 ## Conversation source of truth
 
@@ -120,46 +144,73 @@ POST ─► validate ─► HUMAN_MESSAGE event + queue row (QUEUED) ─► 202 
   Agent replies recorded meanwhile are still included. CLI turns use the
   unchanged Demo 1 context window.
 
-## One active writer per task
+## One active writer per task (database-enforced)
 
 Nothing new writes a workspace: every turn goes through Demo 1's
-`ExecutionLockManager` (atomic `UPDATE … WHERE active_execution IS NULL`). On
-top of that:
+`ExecutionLockManager` (atomic `UPDATE … WHERE active_execution IS NULL`).
+Since Phase 4, **every** correctness guarantee is a database operation, so any
+number of API processes can share one runtime; there is no in-process lock:
 
-- `claim_next_message` only claims when **no message of the task is RUNNING**
-  (single SQL statement in an immediate transaction);
-- the runner runs at most one worker thread per task;
-- if the lock is taken by someone else (a CLI turn), the claim is returned to the
-  queue — never a second writer.
+| Operation | What makes it safe across processes |
+| --- | --- |
+| start | the atomic writer-lock acquire; nothing is written before it |
+| resume / reject | the writer lock is taken **first**; only the winner then records `HUMAN_MESSAGE`/`HUMAN_RESUMED`/`HUMAN_REJECTED` (Phase 3 recorded them before the lock) |
+| pause | `request_pause` is a compare-and-set: a concurrent second pause changes nothing and gets 409 |
+| approve | one conditional `UPDATE` (status, verification, no writer, **no queued instruction**) |
+| reset | holds the writer lock (Demo 1's `human_shell` kind) while deleting the workspace; state reset + lock release are one update |
+| chat enqueue | the idempotency check, task-state check, event and queue row are one immediate transaction |
+| queue claim | one conditional `UPDATE` per row (oldest QUEUED, none RUNNING for the task) |
+
+The reordering of resume/reject changes only failure paths (e.g. a Claude
+preflight failure no longer leaves a recorded-but-unanswered rejection); the
+successful event sequence and all CLI output are unchanged. A second pause while
+a pause request is pending is now refused instead of recording a duplicate.
 
 Different tasks can run in parallel; one task never does.
 
-## Idempotency
+## Idempotency (per user)
 
 `client_message_id` (8–100 chars `[A-Za-z0-9_-]`, the UI uses a UUID) is
-required. `(task_id, client_message_id)` is unique:
+required and is scoped to its **author**: `(task_id, actor_id,
+client_message_id)` is unique, where `actor_id` is the authenticated username.
 
-- a retry with the same key and text returns **202** with the original
-  `message_id` and `"duplicate": true` — no second event, no second turn;
-- the same key with different text returns **409**;
+- a retry by the same user with the same key and text returns **202** with the
+  original `message_id` and `"duplicate": true` — no second event, no second turn;
+- the same user reusing a key with different text gets **409**;
+- another user's identical key is an unrelated message;
 - the UI keeps a failed send's key, so "Retry" is always safe.
+
+**Migration.** Phase 2 made `(task_id, client_message_id)` unique. SQLite cannot
+drop a table constraint, so on first open Phase 4 copies `message_queue` row for
+row into a table with the new constraint, in one transaction
+(`_create_or_migrate_message_queue`). Every Phase 2 row already stores its
+author in `actor_id`, so nothing is backfilled and no event is touched. The step
+runs once (it checks the table's SQL); later opens change nothing — verified by
+a test that builds a real Phase 2 database with the `5172e4a` storage code.
 
 ## Background runner
 
-`TaskTurnRunner` is an in-process dispatcher thread (no Redis/Celery):
+`TaskTurnRunner` is an in-process dispatcher (no Redis/Celery):
 
 - enabled only with `AI_PLATFORM_ENABLE_RUNNER=1`; without it the API accepts
   and durably queues messages but never executes them (useful for inspection);
 - polls the durable queue every second and is woken immediately after a POST;
 - tests drive it synchronously (`run_pending()`) with fake executors.
 
+**Several runners are supported (Phase 4).** Every runner-enabled API process
+can share one runtime: a queue row is claimed by exactly one runner (atomic SQL),
+each task still has one writer (the core lock), and a RUNNING claim is declared
+"interrupted" only once it is older than the stale-lock threshold (default 60 s)
+and does not hold the task's lock — so one process never fails a claim another
+process made a moment ago (a real bug in the Phase 2 design, found in the Phase 4
+audit and covered by a test). Validated with two real API processes.
+
 **Restart behavior.** Accepted messages are durable before the 202 is sent.
 QUEUED messages survive any restart and run when a runner-enabled API starts
-again. If the process stops *during* a turn, the turn is interrupted (as with a
+again. If a process stops *during* a turn, the turn is interrupted (as with a
 killed CLI turn): its writer lock becomes stale (recovered by the next CLI
-command → `PAUSED_BY_HUMAN`), and on the next runner start that message is
-marked FAILED ("The API process stopped before this message's agent turn
-finished."). Run **at most one runner-enabled API process per runtime**.
+command or lock attempt → `PAUSED_BY_HUMAN`) and the message is later marked
+FAILED ("The API process stopped before this message's agent turn finished.").
 
 ## Server-Sent Events
 
@@ -180,6 +231,9 @@ data: {}                                                        every 10 s when 
 ```
 
 - **Ordering:** events are emitted strictly by durable `sequence_id`.
+- **Authentication:** the stream requires the session cookie (401 otherwise; no
+  token in the URL) and re-checks it every heartbeat interval — revoking the
+  session, disabling the user or expiry ends an open stream; reconnects get 401.
 - **Cursor:** `?after=N` for the first connection; `Last-Event-ID` (sent
   automatically by `EventSource` on reconnect) takes precedence. Reconnecting
   with `Last-Event-ID: 201` resumes at the first event after #201 — no replay.
@@ -238,13 +292,16 @@ CLI turn. These three controls need `AI_PLATFORM_ENABLE_RUNNER=1`; without it
 they are reported unavailable (503 if called).
 
 **Idempotency.** Start/resume/reject require `client_action_id`. The execution
-ID is derived from it (`uuid5(task, action, client_action_id)`) and stored by
-the core in the writer lock and in every event of the turn. A retry with the
-same key finds that execution and returns the original acceptance
-(`"duplicate": true`) — no second turn. Control requests are also serialized
-per task inside the API process, so double clicks with different keys produce
-one 202 and 409s. Pause/approve/reset rely on their state preconditions (a
-repeat is a clean 409). No new table was needed.
+ID is derived from it and the **authenticated user**
+(`uuid5(task, user_id, action, client_action_id)`) and stored by the core in the
+writer lock and in every event of the turn. A retry by the same user finds that
+execution and returns the original acceptance (`"duplicate": true`), even when
+the two copies race through different API processes (the loser re-checks after
+losing the lock). Another user's identical key is a different request and gets
+the normal state conflict. Double clicks with different keys produce one 202
+and 409s — by the writer lock alone. Pause/approve/reset rely on their atomic
+preconditions (a repeat is a clean 409). No new table was needed. (Phase 3
+execution IDs did not include the user; old retries simply no longer match.)
 
 **Availability comes from the backend.** `GET /api/tasks/{id}` includes
 
@@ -271,23 +328,108 @@ running.", "Task cannot be approved until it is waiting for human review.",
 "Task is already paused.", "Another execution currently owns this task." (lock
 details such as host names and PIDs are never returned).
 
-## Web actor (not authentication)
+## Identity and authentication (Phase 4)
 
-Phase 2 has a **single server-configured web actor**:
+**Why local access tokens.** A three-person internal tool needs real, distinct
+identities now; company SSO can come later. Phase 4 therefore ships a small local
+provider behind a narrow boundary:
 
-```sh
-AI_PLATFORM_WEB_ACTOR=vakho      # 1-64 chars: letters, digits, . _ -
+```text
+access token ──► POST /api/auth/login ──► AuthService.login ──► web session
+                                                                   │  (HttpOnly cookie)
+request ──► require_user ──► AuthService.resolve(cookie) ──► AuthenticatedUser
+                                                                   │  .human (actor)
+                                  ConversationService / TaskControlService / core
 ```
 
-- every browser message and control is recorded as that actor; request schemas
-  reject any extra field (`actor_id`, `command`, `force`… → 422), so the browser
-  cannot choose an identity or smuggle options;
-- if unset, messaging **and all lifecycle controls** are disabled: POSTs return
-  **503** with a configuration message and the UI is read-only. It never falls back to the OS user
-  (the dev API may run as root);
-- **this is not authentication.** Anyone who can reach the API (loopback + SSH
-  tunnel) acts as that actor. Multi-user identity and authentication belong to
-  Phase 4.
+`TaskSessionService`, `ConversationService`, `TaskControlService` and the event
+model only see an `AuthenticatedUser` / `HumanIdentity`. Replacing the provider
+with OIDC/SSO means replacing `AuthService.login` (and the login screen) — task
+semantics do not change.
+
+**Users.** `users(user_id, username, display_name, role, enabled, created_at)`.
+`user_id` is a UUID used for sessions, tokens, presence and control idempotency.
+The `username` is immutable, unique and is the **actor ID** written into events,
+so provisioning `vakho`, `alex`, `an` matches the Demo 1 history (whose actors
+are those OS usernames). `display_name` is presentation only; events also record
+the display name at the time. No user is hard-coded.
+
+**Roles.** Checked centrally (`Role.can_modify_tasks`, `require_developer`):
+
+| Role | Can |
+| --- | --- |
+| viewer | read tasks, conversation, diff, tests, trace; SSE; presence |
+| developer | + send messages, start, pause, resume, approve, reject, reset |
+| admin | same task capabilities as developer (user management stays in the CLI) |
+
+**Provisioning (CLI only, no web admin):**
+
+```sh
+ai-platform users add --username vakho --display-name "Vakho" --role developer
+ai-platform users list
+ai-platform auth-token create vakho      # prints ap_… once; never shown again
+ai-platform auth-token list              # ids and status only
+ai-platform auth-token revoke tok_…      # no new logins + ends the sessions it created
+ai-platform users disable vakho          # blocks login, ends all sessions; history kept
+ai-platform users enable vakho
+ai-platform users logout-all vakho       # ends every session of the user
+```
+
+**Secrets.** Access tokens (`ap_` + 256 random bits) and session tokens (256
+bits) come from Python's `secrets`. Only SHA-256 digests are stored (a fast hash
+is appropriate for high-entropy random tokens; there are no human passwords);
+the login check uses `hmac.compare_digest`. Plaintext tokens exist only in the
+CLI output and in the cookie — never in the database, events, logs or API
+responses. Login failures are one generic `401 Invalid credentials` (a wrong
+token and an unknown or disabled user look the same).
+
+**Sessions.** `web_sessions(session_id, user_id, token_id, session_hash,
+created_at, expires_at, revoked_at)`. Lifetime `AI_PLATFORM_SESSION_HOURS`
+(default **12 h**). Cookie `ai_platform_session`: `HttpOnly`,
+`SameSite=Strict`, `Path=/`, and `Secure` when `AI_PLATFORM_COOKIE_SECURE=1`
+(off by default only because the demo is plain HTTP through an SSH tunnel —
+**production requires HTTPS and the Secure cookie**). Logout revokes the
+session. **Revocation policy:** revoking an access token blocks new logins *and*
+ends the sessions created with it; disabling a user or `logout-all` ends all of
+the user's sessions immediately. Expired or revoked sessions get 401 and the UI
+returns to the login screen; task state is unaffected.
+
+**Authorization** is enforced server-side and kept separate: 401 (no/invalid
+session) → 403 (role) → 409 (task state). All `/api` routes except
+`/api/health` and `/api/auth/login|logout` require a session; hidden buttons are
+presentation only.
+
+**Cross-site protection.** The session cookie is `SameSite=Strict`, the UI and
+API are same-origin (the Vite proxy preserves `Host`), there is no CORS, and a
+middleware refuses any non-GET `/api` request whose `Sec-Fetch-Site` is
+`cross-site` or whose `Origin` differs from the request's `Host` (unless listed
+in `AI_PLATFORM_ALLOWED_ORIGINS`). Limitation: this relies on modern browser
+headers and cookie rules; there is no separate CSRF token.
+
+**No spoofing.** Request schemas forbid unknown fields (`actor_id`, `role`,
+`command`, `force` → 422); headers such as `X-User` are ignored. The author of a
+message or action is always the session user. `AI_PLATFORM_WEB_ACTOR` is gone:
+the API logs a warning if it is still set and never falls back to it, to the OS
+user or to root.
+
+## Presence and collaboration (Phase 4)
+
+**Presence** (`task_presence(task_id, user_id, last_seen)`) answers "who is
+viewing this task". The UI heartbeats `POST /api/tasks/{id}/presence` every 15 s
+while a task is open (a POST, so GETs stay observational); a user is present
+while their last heartbeat is younger than **45 s**. Old rows are deleted lazily
+on later heartbeats (no cron). Presence is ephemeral and is **never written to
+the event log**. It exposes only user id, username and display name — no
+session, IP or host data; disabled users drop out.
+
+**Collaboration.** Everyone sees the one TaskSession: the same SSE events, the
+same conversation and trace, actor-attributed ("Vakho started the task", "Alex
+paused the task", "An resumed the task"). Chat shows the author of each human
+message (your own on the right). Stale UI is normal: if Alex clicks Approve
+after Vakho already approved, the server answers 409 with a short reason and the
+UI refetches — it shows COMPLETED; nothing breaks. Event and message responses
+include `actor_display_name` (the name recorded on the event, else the user's
+current name, else the actor ID) next to the unchanged `actor_id`.
 
 ## Output sanitization
 
@@ -315,8 +457,13 @@ commands recorded by the Demo 1 install keep their interpreter path
 
 | Endpoint | Purpose |
 | --- | --- |
-| `GET /api/health` | `{"status":"ok"}` |
-| `GET /api/config` | `messaging_enabled`, `web_actor`, `runner_enabled`, `max_message_length` |
+| `GET /api/health` | `{"status":"ok"}` (no session needed) |
+| `POST /api/auth/login` | `{"username","token"}` → user + `Set-Cookie` (401 `Invalid credentials`) |
+| `GET /api/auth/me` | current user `{id, username, display_name, role, can_modify_tasks}` |
+| `POST /api/auth/logout` | revokes the session, clears the cookie (204) |
+| `POST /api/tasks/{id}/presence` | heartbeat; returns current viewers |
+| `GET /api/tasks/{id}/presence` | current viewers `{user_id, username, display_name}` |
+| `GET /api/config` | `runner_enabled`, `max_message_length`, `presence_heartbeat_seconds` |
 | `GET /api/tasks` | sidebar summaries (+ `updated_at`) |
 | `GET /api/tasks/{id}` | task detail + `agent_working`, `queued_messages`, `messaging {accepting, reason}` |
 | `GET /api/tasks/{id}/events` | ordered public event history |
@@ -334,12 +481,14 @@ commands recorded by the Demo 1 install keep their interpreter path
 Control responses: `{status: "accepted"|"completed", action, task_id,
 task_status, execution_id, client_action_id, duplicate, deferred}`.
 
-Errors: 404 unknown task · 409 action/message not valid in the current state,
+Errors: 401 no/expired session or invalid login · 403 viewer role or cross-site
+request · 404 unknown task · 409 action/message not valid in the current state,
 another execution owns the task, or idempotency key reused · 422 invalid body (empty, > 8000 chars, extra fields, bad key, bad
-`Last-Event-ID`) · 503 web actor not configured,
-runner disabled (turn-launching controls) or agent executor unavailable · 500 `{"detail":"Internal server
-error"}` with details only in the server log. `POST /messages` and the six
-control routes are the only non-GET routes (asserted by a test). There is no
+`Last-Event-ID`) · 503 runner disabled
+(turn-launching controls) or agent executor unavailable · 500 `{"detail":"Internal server
+error"}` with details only in the server log. `POST /messages`, the six
+control routes, presence heartbeats and login/logout are the only non-GET routes
+(asserted by a test). There is no
 shell, terminal, filesystem or command endpoint.
 
 ## UI
@@ -357,7 +506,11 @@ shell, terminal, filesystem or command endpoint.
   backend stays the source of truth; React does not re-derive state. Diff is
   refetched after workspace-changing events. Switching tasks closes the old
   stream and opens a new one after the new task's history is loaded.
-- **Header:** web actor, stream state (`live` / `reconnecting…`), Refresh.
+- **Login screen (Phase 4):** username + access token. The token is kept only in
+  component state for the request (never in local/session storage) and cleared.
+- **Header:** current user, role (viewers see "read-only access"), Log out,
+  stream state (`live` / `reconnecting…`), Refresh.
+- **Presence:** "Viewing" initials + names in the task header.
 - **Task header (Phase 3):** status, live chips (Agent working, Pause requested,
   queued messages, writer, verification, model), and only the lifecycle buttons
   the backend allows, with "Why not…" reasons for the rest. Each action shows
@@ -367,7 +520,7 @@ shell, terminal, filesystem or command endpoint.
 ## Run on the Demo VPS
 
 Demo 2 lives in the worktree `/root/ai-platform-demo-demo2` (branch
-`demo2-phase2`). `/opt/ai-platform-demo`, its `/usr/local/bin/ai-platform`
+`demo2-phase4`). `/opt/ai-platform-demo`, its `/usr/local/bin/ai-platform`
 wrapper, and the `demo-1` tag are untouched.
 
 One-time setup:
@@ -378,22 +531,27 @@ cd /root/ai-platform-demo-demo2
 cd web && npm install
 ```
 
-Terminal A — API with messaging and the runner (loopback only, port 8765):
+Provision users against the runtime the API will use (same `AI_PLATFORM_*`
+paths as the launcher; shown for the shared runtime):
 
 ```sh
 cd /root/ai-platform-demo-demo2
-AI_PLATFORM_WEB_ACTOR=vakho AI_PLATFORM_ENABLE_RUNNER=1 ./scripts/serve_api_dev.sh
+export AI_PLATFORM_DATA_DIR=/var/lib/ai-platform \
+       AI_PLATFORM_WORKSPACE_ROOT=/var/lib/ai-platform/workspaces \
+       AI_PLATFORM_DB_PATH=/var/lib/ai-platform/platform.db \
+       AI_PLATFORM_CHECKPOINT_DB_PATH=/var/lib/ai-platform/langgraph-checkpoints.db
+.venv/bin/ai-platform users add --username vakho --display-name "Vakho" --role developer
+.venv/bin/ai-platform users add --username alex  --display-name "Alex"  --role developer
+.venv/bin/ai-platform users add --username an    --display-name "An"    --role developer
+.venv/bin/ai-platform auth-token create vakho    # hand each person their token privately
 ```
 
-Without the two variables the API is read-only (Phase 1 behavior); with only
-`AI_PLATFORM_WEB_ACTOR`, chat messages queue and quick controls (pause, approve,
-reset) work, but nothing launches an agent turn. The
-launcher mirrors `/usr/local/bin/ai-platform` (`umask 0002`, shared runtime
-under `/var/lib/ai-platform`); any `AI_PLATFORM_*` variable overrides it —
-e.g. point `AI_PLATFORM_DATA_DIR`, `AI_PLATFORM_WORKSPACE_ROOT`,
-`AI_PLATFORM_DB_PATH` and `AI_PLATFORM_CHECKPOINT_DB_PATH` at a copied runtime
-to experiment safely. Starting Phase 2 against a runtime adds the empty
-`message_queue` table to its database (additive; Demo 1 ignores it).
+Terminal A — API (loopback only, port 8765):
+
+```sh
+cd /root/ai-platform-demo-demo2
+AI_PLATFORM_ENABLE_RUNNER=1 ./scripts/serve_api_dev.sh
+```
 
 Terminal B — UI:
 
@@ -402,16 +560,24 @@ cd /root/ai-platform-demo-demo2/web
 npm run dev
 ```
 
-Workstation:
+Workstation (each developer):
 
 ```sh
-ssh -L 5173:127.0.0.1:5173 -L 8765:127.0.0.1:8765 root@<vps>
-# open http://localhost:5173
+ssh -L 5173:127.0.0.1:5173 root@<vps>
+# open http://localhost:5173 and sign in with username + access token
 ```
 
-Vite proxies `/api/*` (including the SSE stream) to `http://127.0.0.1:8765`
-(override with `AI_PLATFORM_API_PROXY`); `VITE_API_BASE_URL` selects another
-backend at build time. Port 8000 belongs to another service on this VPS.
+Opening a runtime with Phase 4 code adds `users`, `auth_tokens`, `web_sessions`
+and `task_presence`, and creates or migrates `message_queue` — all additive; the
+frozen Demo 1 CLI keeps working on such a database (verified). To experiment
+safely, point the `AI_PLATFORM_*` paths at a copied runtime. A second API
+process (e.g. `AI_PLATFORM_API_PORT=8766 ./scripts/serve_api_dev.sh`) can share
+the runtime, with or without its own runner. Even with authentication, keep the
+API on 127.0.0.1 behind the SSH tunnel — this is not a public deployment.
+
+Vite proxies `/api/*` (including SSE) to `http://127.0.0.1:8765` (override with
+`AI_PLATFORM_API_PROXY`) and **preserves the browser's `Host`**, which the
+same-origin check requires. Port 8000 belongs to another service on this VPS.
 
 ## Code layout
 
@@ -419,14 +585,19 @@ backend at build time. Port 8000 belongs to another service on this VPS.
 src/ai_platform/application.py     shared composition for CLI and API (+ injectable executor)
 src/ai_platform/sessions.py        TaskSessionService: continue_conversation(), human_message_event()
 src/ai_platform/conversation.py    ConversationService: submit/list, acceptance rules, idempotency
-src/ai_platform/controls.py        TaskControlService: availability, controls, action idempotency
+src/ai_platform/controls.py        TaskControlService: availability, roles, controls, action idempotency
+src/ai_platform/auth.py            AuthService (replaceable provider): users, tokens, sessions
+src/ai_platform/presence.py        PresenceService: TTL presence outside the event log
 src/ai_platform/runner.py          TaskTurnRunner: durable FIFO claims, one turn per task at a time
 src/ai_platform/storage.py         + message_queue table and atomic queue operations
 src/ai_platform/api/presenters.py  metadata allowlist + PathRedactor + response builders
-src/ai_platform/api/routes/        health, config, tasks, messages, stream
+src/ai_platform/api/security.py    require_user (401), require_developer (403), same-origin middleware
+src/ai_platform/api/routes/        health, auth, config, tasks, messages, controls, presence, stream
 web/src/api/useTaskStream.ts       EventSource lifecycle, cursor, watchdog reconnect
 web/src/components/ChatPanel.tsx   conversation + composer
 web/src/components/TaskControls.tsx lifecycle buttons, dialogs, feedback
+web/src/components/Login.tsx       sign-in (token never stored in the browser)
+web/src/api/usePresence.ts         presence heartbeat
 ```
 
 ## Quality checks
@@ -449,23 +620,36 @@ async start/resume, idempotent retries, parallel start/resume clicks (one turn),
 chat-during-start, cooperative pause, approve refused mid-turn or with queued
 chat, reject as a correction turn, reset confirmation/semantics, availability
 per state, disabled controls without actor/runner, lock-detail redaction, and a
-full start → chat → pause → resume → approve loop.
+full start → chat → pause → resume → approve loop. `tests/test_auth.py` covers
+hashing (no plaintext token or session in the database), cookie flags, generic
+login failures, `/auth/me`, logout, expiry, disable, token and session
+revocation, 401 everywhere except health/login, viewer 403s, actor spoofing,
+cross-site refusal, secrets absent from events/logs, and the provisioning CLI.
+`tests/test_multiuser.py` covers per-user message/control idempotency, the real
+Phase 2 → Phase 4 migration (idempotent, rows preserved), start/resume races
+through two independently composed API processes, a same-user duplicate racing
+through both, two runners draining one queue, fresh claims not stolen, presence
+TTL/ephemerality, per-user trace attribution with a stale approve, and SSE for
+two viewers plus revoked streams (open and new).
 
 ## Current limitations
 
 - **Still CLI/SSH-only:** human shell (`ai-platform shell`), `attach --follow`,
-  `doctor`; no browser terminal, filesystem editor or command execution.
-- single web actor, no authentication; loopback + SSH tunnel only;
-- one runner-enabled API process per runtime; control requests are serialized
-  per task within that process (CLI users can still race each other exactly as
-  in Demo 1 — the writer lock keeps that safe);
-- agent text arrives when the SDK turn ends, not token by token;
-- start/resume/reject need `AI_PLATFORM_ENABLE_RUNNER=1`.
+  `doctor`, user/token management; no browser terminal, file editor or commands.
+- Local access tokens, not SSO; no login rate limiting (tokens are 256-bit
+  random); cross-site protection relies on SameSite + Origin/Sec-Fetch-Site.
+- Loopback + SSH tunnel only; plain HTTP in the demo (Secure cookie off).
+- Presence refreshes with the ~15 s heartbeat, not instantly.
+- Agent text arrives when the SDK turn ends, not token by token.
+- Start/resume/reject need `AI_PLATFORM_ENABLE_RUNNER=1` on the API process
+  that receives them.
+- SQLite remains the single runtime store (fine for a few users and processes).
 
-## Future / Phase 4+
+## Future / Phase 5+
 
-- Authentication, multi-user identity, per-user attribution, authorization — Phase 4.
-- Browser terminal / human shell — Phase 5.
+- Company SSO/OIDC replacing the local token provider (same `AuthService` boundary).
+- Engineering workspace experience; browser terminal / human shell — Phase 5.
+- Polish, security review, HTTPS deployment and freeze — Phase 6.
 - Persist agent activity incrementally during a turn (live tool activity).
 - Optional stream of public assistant text if the SDK allows it without
   bypassing durable state; never hidden reasoning.

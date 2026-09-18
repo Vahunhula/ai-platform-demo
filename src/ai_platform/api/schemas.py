@@ -13,12 +13,39 @@ class HealthResponse(BaseModel):
 
 
 class ConfigResponse(BaseModel):
-    """What this API process allows the browser to do."""
+    """Server capabilities relevant to the browser."""
 
-    messaging_enabled: bool
-    web_actor: str | None
     runner_enabled: bool
     max_message_length: int
+    presence_heartbeat_seconds: int
+
+
+class LoginRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    username: str = Field(min_length=1, max_length=64)
+    token: str = Field(min_length=1, max_length=200)
+
+
+class UserResponse(BaseModel):
+    """Public identity of a user: never tokens, hashes or session data."""
+
+    id: str
+    username: str
+    display_name: str
+    role: Literal["viewer", "developer", "admin"]
+    can_modify_tasks: bool
+
+
+class PresenceUser(BaseModel):
+    user_id: str
+    username: str
+    display_name: str
+
+
+class PresenceResponse(BaseModel):
+    task_id: str
+    viewers: list[PresenceUser]
 
 
 class TaskListItem(BaseModel):
@@ -88,6 +115,8 @@ class EventResponse(BaseModel):
     event_type: str
     actor_type: str
     actor_id: str
+    # Display name recorded with the event (historical), falling back to actor_id.
+    actor_display_name: str
     execution_id: str | None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
@@ -107,6 +136,7 @@ class MessageResponse(BaseModel):
     task_id: str
     role: Literal["human", "agent"]
     actor_id: str
+    actor_display_name: str
     content: str
     timestamp: datetime
     sequence_id: int

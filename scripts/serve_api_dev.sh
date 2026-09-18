@@ -3,10 +3,13 @@
 # runtime (/var/lib/ai-platform), mirroring /usr/local/bin/ai-platform.
 # Any AI_PLATFORM_* variable already set in the environment takes precedence.
 #
-# Browser messaging needs both (see docs/demo2-ui.md):
-#   AI_PLATFORM_WEB_ACTOR=<name>     server-configured web actor (not authentication)
-#   AI_PLATFORM_ENABLE_RUNNER=1      execute queued browser messages in this process
-# Without them the API is read-only.
+# Web users sign in with CLI-provisioned access tokens (see docs/demo2-ui.md):
+#   ai-platform users add --username vakho --display-name Vakho --role developer
+#   ai-platform auth-token create vakho
+# Optional:
+#   AI_PLATFORM_ENABLE_RUNNER=1      run browser-initiated agent turns in this process
+#   AI_PLATFORM_SESSION_HOURS=12     web session lifetime
+#   AI_PLATFORM_COOKIE_SECURE=1      required behind HTTPS (production)
 set -eu
 
 umask 0002

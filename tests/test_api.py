@@ -10,6 +10,8 @@ from ai_platform.api.app import create_app
 from ai_platform.application import ApplicationContext, create_application_context
 from ai_platform.config import Settings
 from ai_platform.events import ActorType, Event, EventType
+from tests.test_messaging import WEB_ACTOR, provision
+from tests.test_messaging import _client as logged_in
 
 
 def _settings(tmp_path: Path) -> Settings:
@@ -46,8 +48,7 @@ async def api_client(tmp_path: Path) -> AsyncIterator[tuple[httpx.AsyncClient, A
     context = create_application_context(
         _settings(tmp_path),
     )
-    transport = httpx.ASGITransport(app=create_app(context))
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+    async with logged_in(create_app(context)) as client:
         yield client, context
 
 
@@ -189,8 +190,13 @@ async def test_unexpected_failure_returns_generic_500(
         raise RuntimeError("git failed in /secret/runtime/path")
 
     monkeypatch.setattr(context.sessions, "get_diff", broken_diff)
-    transport = httpx.ASGITransport(app=create_app(context), raise_app_exceptions=False)
+    app = create_app(context)
+    token = provision(app)
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as quiet_client:
+        await quiet_client.post(
+            "/api/auth/login", json={"username": WEB_ACTOR, "token": token}
+        )
         response = await quiet_client.get("/api/tasks/DEMO-1/diff")
 
     assert response.status_code == 500
@@ -217,6 +223,7 @@ async def test_human_display_name_is_public_metadata(
     events = (await client.get("/api/tasks/DEMO-2/events")).json()
 
     assert events[-1]["actor_id"] == "alex"
+    assert events[-1]["actor_display_name"] == "Alex"
     assert events[-1]["metadata"] == {"display_name": "Alex"}
 
 
@@ -237,7 +244,7 @@ def test_api_context_does_not_recover_locks(
     assert calls[0].startswith("cli-startup@")
 
 
-def test_mutation_routes_are_exactly_messages_and_lifecycle_controls() -> None:
+def test_mutation_routes_are_exactly_auth_presence_messages_and_controls() -> None:
     mutations = {
         (route.path, method)
         for route in create_app().routes
@@ -247,6 +254,19 @@ def test_mutation_routes_are_exactly_messages_and_lifecycle_controls() -> None:
     }
 
     assert mutations == {
-        (f"/api/tasks/{{task_id}}/{name}", "POST")
-        for name in ("messages", "start", "pause", "resume", "approve", "reject", "reset")
+        ("/api/auth/login", "POST"),
+        ("/api/auth/logout", "POST"),
+        *(
+            (f"/api/tasks/{{task_id}}/{name}", "POST")
+            for name in (
+                "messages",
+                "presence",
+                "start",
+                "pause",
+                "resume",
+                "approve",
+                "reject",
+                "reset",
+            )
+        ),
     }

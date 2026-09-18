@@ -312,7 +312,11 @@ class TaskSessionService:
             raise TaskSessionError(f"{task.id} has no active workspace to pause")
         if record.status is TaskStatus.PAUSED_BY_HUMAN and not record.agent_running:
             raise TaskSessionError(f"{task.id} is already paused")
+        if record.pause_requested:
+            raise TaskSessionError(f"{task.id} already has a pause request")
         result = self.storage.request_pause(task.id)
+        if result is None:  # a concurrent pause won the atomic update
+            raise TaskSessionError(f"{task.id} is already paused")
         self._append_human_event(
             task.id,
             EventType.HUMAN_PAUSED,
@@ -429,20 +433,17 @@ class TaskSessionService:
         *,
         execution_id: str | None = None,
     ) -> PreparedTurn:
-        """Record the resume (and optional instruction) and take the writer lock."""
+        """Take the writer lock, then record the optional instruction and the resume.
+
+        The lock is the cross-process serialization point: only the request that
+        wins it records intent events, so concurrent resumes never duplicate them.
+        """
 
         task = self._definition(task_id)
         record = self._record(task.id)
         if record.status is not TaskStatus.PAUSED_BY_HUMAN:
             raise TaskSessionError(f"{task.id} is not PAUSED_BY_HUMAN")
-        if message is not None:
-            content = self._validate_message(message)
-            self._append_human_event(
-                task.id,
-                EventType.HUMAN_MESSAGE,
-                human,
-                {"message": content},
-            )
+        content = self._validate_message(message) if message is not None else None
         executor = self._preflight_executor()
         execution_id = execution_id or str(uuid4())
         lock = self.locks.acquire(
@@ -454,14 +455,20 @@ class TaskSessionService:
         )
         if not lock.acquired:
             raise self._lock_error(task.id, lock)
+        if content is not None:
+            self._append_human_event(
+                task.id,
+                EventType.HUMAN_MESSAGE,
+                human,
+                {"message": content},
+            )
         self._append_human_event(task.id, EventType.HUMAN_RESUMED, human)
         return PreparedTurn(task, human, lock.owner_token, execution_id, executor, True)
 
     def reject(self, task_id: str, message: str, human: HumanIdentity) -> TurnOutcome:
         """Record review rejection and continue against the same workspace."""
 
-        prepared = self.prepare_reject(task_id, message, human)
-        return prepared if isinstance(prepared, TurnOutcome) else self.run_prepared(prepared)
+        return self.run_prepared(self.prepare_reject(task_id, message, human))
 
     def prepare_reject(
         self,
@@ -470,11 +477,11 @@ class TaskSessionService:
         human: HumanIdentity,
         *,
         execution_id: str | None = None,
-    ) -> PreparedTurn | TurnOutcome:
-        """Record the rejection feedback and take the lock for the correction turn.
+    ) -> PreparedTurn:
+        """Take the lock for the correction turn, then record the rejection feedback.
 
-        Returns a not-started ``TurnOutcome`` (feedback recorded, no turn) when
-        another writer won the lock, exactly as the CLI always reported it.
+        Only the request that wins the writer lock records HUMAN_REJECTED and the
+        feedback message, so concurrent rejections never duplicate them.
         """
 
         task = self._definition(task_id)
@@ -484,6 +491,11 @@ class TaskSessionService:
             raise TaskSessionError(
                 f"{task.id} must be WAITING_FOR_HUMAN before review rejection"
             )
+        prepared = self._prepare_continuation(
+            task, human, {TaskStatus.WAITING_FOR_HUMAN}, execution_id=execution_id
+        )
+        if isinstance(prepared, TurnOutcome):
+            raise TaskLockedError(f"{task.id} is being changed by another execution")
         self._append_human_event(
             task.id,
             EventType.HUMAN_REJECTED,
@@ -496,9 +508,7 @@ class TaskSessionService:
             human,
             {"message": content},
         )
-        return self._prepare_continuation(
-            task, human, {TaskStatus.WAITING_FOR_HUMAN}, execution_id=execution_id
-        )
+        return prepared
 
     def approve(self, task_id: str, human: HumanIdentity) -> None:
         """Attribute and persist a human approval decision."""
@@ -513,10 +523,27 @@ class TaskSessionService:
         record = self._record(task.id)
         if record.active_execution is not None:
             raise TaskSessionError(f"{task.id} currently has an active workspace writer")
+        # Hold the one-writer lock while the workspace is deleted, so no concurrent
+        # start/resume (from any process) can run against a disappearing workspace.
+        # Demo 1's "human_shell" kind is reused for this exclusive human operation.
+        lock = self.locks.acquire(
+            task.id,
+            ExecutionKind.HUMAN_SHELL,
+            human.actor_id,
+            str(uuid4()),
+            allowed_statuses=set(TaskStatus),
+        )
+        if not lock.acquired:
+            raise self._lock_error(task.id, lock)
         workspace = self.workspaces.get_path(task.id)
         workspace_existed = self.workspaces.exists(task.id)
-        self.workspaces.destroy(task.id)
-        self.storage.reset_task_runtime(task.id)
+        try:
+            self.workspaces.destroy(task.id)
+            # Resets runtime state and releases the lock in one atomic update.
+            self.storage.reset_task_runtime(task.id, owner=lock.owner_token)
+        except BaseException:
+            self.storage.release_execution(task.id, lock.owner_token)
+            raise
         if workspace_existed:
             self._append_human_event(
                 task.id,

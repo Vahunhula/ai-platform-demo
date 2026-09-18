@@ -27,15 +27,11 @@ ACCEPTING_STATUSES = frozenset(
 )
 
 _REJECTION_REASONS = {
-    TaskStatus.READY: "has not been started yet; start it from the CLI first",
-    TaskStatus.PAUSED_BY_HUMAN: "is paused by a human; resume it from the CLI first",
+    TaskStatus.READY: "has not been started yet; start it first",
+    TaskStatus.PAUSED_BY_HUMAN: "is paused by a human; resume it first",
     TaskStatus.COMPLETED: "is completed",
-    TaskStatus.FAILED: "has failed; inspect or reset it from the CLI first",
+    TaskStatus.FAILED: "has failed; inspect or reset it first",
 }
-
-
-class MessagingDisabledError(TaskSessionError):
-    """Browser messaging is not configured for this API process."""
 
 
 class MessageNotAcceptedError(TaskSessionError):
@@ -69,27 +65,12 @@ class ConversationService:
         self,
         sessions: TaskSessionService,
         storage: SQLiteStorage,
-        web_actor: str | None,
         *,
         on_submitted: Callable[[], None] | None = None,
     ) -> None:
         self.sessions = sessions
         self.storage = storage
-        self.web_actor = web_actor
         self.on_submitted = on_submitted
-
-    @property
-    def messaging_enabled(self) -> bool:
-        return self.web_actor is not None
-
-    def web_identity(self) -> HumanIdentity:
-        """Return the server-configured web actor; never a browser-supplied identity."""
-
-        if self.web_actor is None:
-            raise MessagingDisabledError(
-                "Browser messaging is disabled: AI_PLATFORM_WEB_ACTOR is not configured."
-            )
-        return HumanIdentity(actor_id=self.web_actor, display_name=self.web_actor)
 
     @staticmethod
     def acceptance(record: TaskRecord) -> str | None:
@@ -113,14 +94,23 @@ class ConversationService:
             for event in session.conversation
         ]
 
-    def submit(self, task_id: str, content: str, client_message_id: str) -> SubmitResult:
-        """Durably record a browser message and queue its agent turn, once per client key."""
+    def submit(
+        self,
+        task_id: str,
+        content: str,
+        client_message_id: str,
+        human: HumanIdentity,
+    ) -> SubmitResult:
+        """Durably record a message and queue its agent turn, once per author and key.
 
-        human = self.web_identity()
+        ``human`` is the authenticated author resolved by the HTTP layer; the
+        idempotency key is scoped to it, so two users' keys never collide.
+        """
+
         task = self.sessions.get_definition(task_id)
         normalized = self.sessions.validate_message(content)
 
-        existing = self.storage.get_queued_message(task.id, client_message_id)
+        existing = self.storage.get_queued_message(task.id, human.actor_id, client_message_id)
         if existing is not None:
             return SubmitResult(self._same_content(existing, normalized), created=False)
 
@@ -135,12 +125,17 @@ class ConversationService:
             human,
             {"message_id": message_id, "channel": "web"},
         )
-        message, created = self.storage.enqueue_message(
+        stored = self.storage.enqueue_message(
             event,
             message_id=message_id,
             client_message_id=client_message_id,
             display_name=human.display_name,
+            accepting_statuses=ACCEPTING_STATUSES,
         )
+        if stored is None:  # the task changed state concurrently (e.g. approved elsewhere)
+            latest = self.sessions.get_session(task.id).record
+            raise MessageNotAcceptedError(self.acceptance(latest) or f"{task.id} changed state.")
+        message, created = stored
         if not created:
             message = self._same_content(message, normalized)
         elif self.on_submitted is not None:

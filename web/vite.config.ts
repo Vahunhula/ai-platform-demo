@@ -14,7 +14,10 @@ export default defineConfig(({ mode }) => {
       port: 5173,
       strictPort: true,
       proxy: {
-        "/api": apiTarget,
+        // Keep the browser's Host header: the API accepts cookie-authenticated
+        // mutations only when Origin matches Host (same-origin), so the dev proxy
+        // must not rewrite Host to the backend's address.
+        "/api": { target: apiTarget, changeOrigin: false },
       },
     },
   };
