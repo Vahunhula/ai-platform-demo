@@ -90,6 +90,11 @@ _COMMON_PUBLIC_METADATA = {
     "duration_api_ms",
     "total_cost_usd",
     "models",
+    "repository_id",
+    "repository_slug",
+    "base_branch",
+    "assignee_user_id",
+    "assignee_username",
 }
 _TEST_EVENTS = {EventType.TEST_STARTED, EventType.TEST_PASSED, EventType.TEST_FAILED}
 # A path component continues with these characters; a placeholder must not cut one in half.

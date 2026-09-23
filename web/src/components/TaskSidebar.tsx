@@ -5,15 +5,20 @@ interface Props {
   tasks: TaskListItem[];
   selectedId: string | null;
   onSelect: (taskId: string) => void;
+  onNewTask: () => void;
+  canCreate: boolean;
 }
 
-export function TaskSidebar({ tasks, selectedId, onSelect }: Props) {
+export function TaskSidebar({ tasks, selectedId, onSelect, onNewTask, canCreate }: Props) {
   return (
     <aside className="sidebar">
       <div className="sidebar-heading">
         <h2>Tasks</h2>
         <span>{tasks.length}</span>
       </div>
+      <button className="new-task-button" onClick={onNewTask} disabled={!canCreate}>
+        + New Task
+      </button>
       <nav aria-label="Tasks">
         {tasks.map((task) => (
           <button

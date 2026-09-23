@@ -19,6 +19,55 @@ its task lifecycle, storage, workspace, routing, executor, or LangGraph code.
 **The Platform Core remains the source of truth. The API is an interface layer.
 The React UI is a presentation layer.**
 
+## Demo 2.5 Phase 1 — repository registry and task creation
+
+Repositories are a server-side trust boundary. The browser receives only an ID,
+slug, display name and default branch from `GET /api/repositories`; source paths
+never leave the server. Phase 1 supports `local_git`: an administrator registers
+a local Git working-tree root or a directory within one, plus an existing local
+branch. Workspace provisioning exports that directory from the validated branch
+and initializes a new, task-owned Git baseline.
+
+```bash
+ai-platform repository list
+ai-platform repository add \
+  --slug python-demo \
+  --display-name "Python Demo Repository" \
+  --source /absolute/path/to/demo_repo \
+  --default-branch main
+ai-platform repository disable python-demo
+```
+
+Registration rejects duplicate/unsafe slugs, missing or non-Git sources,
+missing/unsafe branch names, the filesystem root, and sources inside the task
+workspace root. CLI handlers remain thin; `RepositoryService` owns validation
+and persistence.
+
+Authenticated developers create tasks with `POST /api/tasks` using
+`title`, `description`, `repository_id`, `base_branch`, `assignee_user_id`, and
+an optional `jira_key`. The actor always comes from the HttpOnly web session.
+`GET /api/users/assignable` returns only enabled developer-capable identities,
+without tokens, sessions, or hashes. Viewers receive 403.
+
+Task creation validates all references, generates a collision-resistant
+`TASK-<8 hex characters>` ID, provisions `workspaces/<task-id>`, then writes the
+task and creation/provisioning events in one SQLite transaction. A successful
+201 therefore means both the task row and workspace exist. A persistence failure
+removes the provisional workspace; cleanup failures are logged as orphan
+conditions. Absolute source/workspace paths are absent from browser responses
+and creation event metadata.
+
+Registered tasks start in the existing `READY` lifecycle. Start reuses their
+eager workspace without overwriting pre-start human edits. Reset deletes and
+re-exports a registered task workspace from its stored repository/base branch,
+then leaves the task `READY`; legacy file-defined DEMO tasks keep their previous
+delete-and-lazy-recreate reset/start behavior. The schema changes are additive
+and nullable, so historical tasks and events remain readable.
+
+The registry and task fields are the ingestion boundary a future Jira adapter
+can call. This phase does not contact Jira and does not add workflow phases,
+artifacts, scoring, GitHub, or review agents.
+
 ## Architecture
 
 ```text

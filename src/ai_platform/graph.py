@@ -207,17 +207,21 @@ def _build_graph(
 
     def prepare_workspace(_state: TaskGraphState) -> TaskGraphState:
         try:
-            workspace = workspace_provider.create(task.id)
-            storage.update_workspace_path(task.id, workspace)
-            storage.append_event(
-                Event(
-                    task_id=task.id,
-                    event_type=EventType.WORKSPACE_CREATED,
-                    actor_type=ActorType.SYSTEM,
-                    actor_id="local-workspace",
-                    metadata={"execution_id": execution_id, "path": str(workspace)},
+            record = storage.get_task(task.id)
+            if record and record.repository_id and workspace_provider.exists(task.id):
+                workspace = workspace_provider.get_path(task.id)
+            else:
+                workspace = workspace_provider.create(task.id)
+                storage.update_workspace_path(task.id, workspace)
+                storage.append_event(
+                    Event(
+                        task_id=task.id,
+                        event_type=EventType.WORKSPACE_CREATED,
+                        actor_type=ActorType.SYSTEM,
+                        actor_id="local-workspace",
+                        metadata={"execution_id": execution_id, "path": str(workspace)},
+                    )
                 )
-            )
             return {"workspace_path": str(workspace), "fatal_error": ""}
         except Exception as error:
             return {"fatal_error": _safe_error(error)}

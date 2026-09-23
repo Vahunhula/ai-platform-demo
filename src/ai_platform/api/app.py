@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse
 
 from ai_platform.api.presenters import Presenter
 from ai_platform.api.routes.auth import router as auth_router
+from ai_platform.api.routes.catalog import router as catalog_router
 from ai_platform.api.routes.config import router as config_router
 from ai_platform.api.routes.controls import router as controls_router
 from ai_platform.api.routes.health import router as health_router
@@ -33,8 +34,14 @@ from ai_platform.conversation import (
     MessageNotAcceptedError,
 )
 from ai_platform.presence import PresenceService
+from ai_platform.repositories import RepositoryError
 from ai_platform.runner import TaskTurnRunner
 from ai_platform.sessions import ExecutorUnavailableError, TaskNotFoundError, TaskSessionError
+from ai_platform.task_creation import (
+    TaskCreationError,
+    TaskCreationService,
+    TaskProvisioningError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +56,9 @@ def _wire(
     application.state.context = context
     application.state.runner = runner
     application.state.auth = auth
+    application.state.task_creation = TaskCreationService(
+        context.storage, context.repositories, auth, context.workspaces
+    )
     application.state.cookie_secure = settings.cookie_secure
     application.state.presence = PresenceService(context.storage, auth)
     application.state.presenter = Presenter(settings, auth.display_names)
@@ -154,6 +164,19 @@ def create_app(
     async def task_session_error(_request: Request, exc: TaskSessionError) -> JSONResponse:
         return error(400, str(exc))
 
+    @application.exception_handler(RepositoryError)
+    @application.exception_handler(TaskCreationError)
+    async def creation_validation_error(
+        _request: Request, exc: RepositoryError | TaskCreationError
+    ) -> JSONResponse:
+        return error(400, str(exc))
+
+    @application.exception_handler(TaskProvisioningError)
+    async def provisioning_error(
+        _request: Request, exc: TaskProvisioningError
+    ) -> JSONResponse:
+        return error(503, str(exc))
+
     @application.exception_handler(Exception)
     async def unexpected_error(request: Request, _exc: Exception) -> JSONResponse:
         # Details (paths, Git output, tracebacks) stay in the server log only.
@@ -166,6 +189,7 @@ def create_app(
     # Everything else requires a live session (401); mutations add role checks (403).
     for router in (
         config_router,
+        catalog_router,
         tasks_router,
         messages_router,
         controls_router,

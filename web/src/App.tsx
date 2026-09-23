@@ -7,6 +7,7 @@ import { ChatPanel } from "./components/ChatPanel";
 import { TaskOverview } from "./components/TaskOverview";
 import { TaskControls } from "./components/TaskControls";
 import { TaskSidebar } from "./components/TaskSidebar";
+import { NewTaskDialog } from "./components/NewTaskDialog";
 import { DiffTab, TestsTab, TraceTab } from "./components/tabs";
 import type {
   ConfigResponse,
@@ -15,6 +16,7 @@ import type {
   PlatformEvent,
   TaskDetail,
   TaskListItem,
+  CreateTaskResponse,
 } from "./types/api";
 
 type Tab = "Chat" | "Diff" | "Tests" | "Trace";
@@ -83,6 +85,7 @@ function App({ user, onSignOut }: AppProps) {
   const [tab, setTab] = useState<Tab>("Chat");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [creating, setCreating] = useState(false);
 
   const selectedRef = useRef<string | null>(null);
   selectedRef.current = selectedId;
@@ -227,6 +230,12 @@ function App({ user, onSignOut }: AppProps) {
     setSelectedId(taskId);
   };
 
+  const taskCreated = (task: CreateTaskResponse) => {
+    setCreating(false);
+    void loadTasks();
+    selectTask(task.id);
+  };
+
   return (
     <div className="app-shell">
       <header className="topbar">
@@ -260,7 +269,13 @@ function App({ user, onSignOut }: AppProps) {
       </header>
 
       <div className="workspace">
-        <TaskSidebar tasks={tasks} selectedId={selectedId} onSelect={selectTask} />
+        <TaskSidebar
+          tasks={tasks}
+          selectedId={selectedId}
+          onSelect={selectTask}
+          onNewTask={() => setCreating(true)}
+          canCreate={user.can_modify_tasks}
+        />
 
         <main className="main-content">
           {error && <div className="error-banner">{error}</div>}
@@ -358,6 +373,7 @@ function App({ user, onSignOut }: AppProps) {
           )}
         </main>
       </div>
+      {creating && <NewTaskDialog onClose={() => setCreating(false)} onCreated={taskCreated} />}
     </div>
   );
 }

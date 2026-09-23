@@ -135,7 +135,7 @@ class TaskControlService:
                 return "Task cannot be started because it is already running."
             if status is not TaskStatus.READY:
                 return f"Task can only be started from READY (it is {status.value.upper()})."
-            if workspace:
+            if workspace and record.repository_id is None:
                 return "Task already has a workspace; reset it before starting again."
             return None
         if action is ControlAction.PAUSE:

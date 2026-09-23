@@ -19,6 +19,7 @@ from ai_platform.models import (
     TaskDefinition,
     TaskRecord,
     TaskStatus,
+    VerificationConfig,
     VerificationStatus,
 )
 
@@ -124,6 +125,7 @@ class SQLiteStorage:
                 """
             )
             self._migrate_task_columns(connection)
+            self._create_repository_table(connection)
             self._create_or_migrate_events(connection)
             connection.execute(
                 """
@@ -159,6 +161,39 @@ class SQLiteStorage:
                 """
             )
             self._create_auth_tables(connection)
+
+    def create_managed_task(self, record: TaskRecord, events: list[Event]) -> None:
+        """Atomically persist one eagerly provisioned task and its audit history."""
+
+        with self._connect(immediate=True) as connection:
+            connection.execute(
+                """
+                INSERT INTO tasks (
+                    task_id, title, description, difficulty, status, workspace_path,
+                    repository_id, base_branch, assignee_user_id, jira_key, created_by,
+                    acceptance_criteria_json, verification_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record.task_id,
+                    record.title,
+                    record.description,
+                    record.difficulty.value,
+                    record.status.value,
+                    record.workspace_path,
+                    record.repository_id,
+                    record.base_branch,
+                    record.assignee_user_id,
+                    record.jira_key,
+                    record.created_by,
+                    json.dumps(record.acceptance_criteria),
+                    record.verification.model_dump_json() if record.verification else None,
+                    record.created_at.isoformat(),
+                    record.updated_at.isoformat(),
+                ),
+            )
+            for event in events:
+                self._insert_event(connection, event)
 
     def create_task(self, task: TaskDefinition) -> bool:
         """Create initial runtime state, returning whether a row was inserted."""
@@ -272,6 +307,35 @@ class SQLiteStorage:
                     task_id,
                 ),
             )
+
+    def reset_managed_task_runtime(
+        self, task_id: str, workspace_path: Path, owner: str
+    ) -> None:
+        """Reset a registered task while retaining its freshly provisioned workspace."""
+
+        with self._connect(immediate=True) as connection:
+            cursor = connection.execute(
+                """
+                UPDATE tasks
+                SET status = ?, selected_tier = NULL, selected_model = NULL,
+                    attempt = 0, verification_status = ?, workspace_path = ?,
+                    active_execution = NULL, execution_owner = NULL, execution_id = NULL,
+                    execution_actor_id = NULL, execution_pid = NULL,
+                    execution_hostname = NULL, execution_started_at = NULL,
+                    execution_heartbeat_at = NULL, pause_requested = 0, updated_at = ?
+                WHERE task_id = ? AND execution_owner = ?
+                """,
+                (
+                    TaskStatus.READY.value,
+                    VerificationStatus.NOT_RUN.value,
+                    str(workspace_path),
+                    datetime.now(UTC).isoformat(),
+                    task_id,
+                    owner,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError(f"{task_id} lost its reset workspace lock")
 
     def append_event(self, event: Event) -> Event:
         """Append and return an event. No update or delete event API exists."""
@@ -809,6 +873,7 @@ class SQLiteStorage:
         return TaskRecord(
             task_id=row["task_id"],
             title=row["title"],
+            description=row["description"],
             difficulty=row["difficulty"],
             status=row["status"],
             selected_tier=row["selected_tier"],
@@ -816,6 +881,21 @@ class SQLiteStorage:
             attempt=row["attempt"],
             verification_status=row["verification_status"],
             workspace_path=row["workspace_path"],
+            repository_id=row["repository_id"],
+            base_branch=row["base_branch"],
+            assignee_user_id=row["assignee_user_id"],
+            jira_key=row["jira_key"],
+            created_by=row["created_by"],
+            acceptance_criteria=(
+                json.loads(row["acceptance_criteria_json"])
+                if row["acceptance_criteria_json"]
+                else None
+            ),
+            verification=(
+                VerificationConfig.model_validate_json(row["verification_json"])
+                if row["verification_json"]
+                else None
+            ),
             active_execution=row["active_execution"],
             execution_owner=row["execution_owner"],
             execution_id=row["execution_id"],
@@ -894,6 +974,7 @@ class SQLiteStorage:
     def _migrate_task_columns(connection: sqlite3.Connection) -> None:
         columns = {row["name"] for row in connection.execute("PRAGMA table_info(tasks)")}
         migrations = {
+            "description": "ALTER TABLE tasks ADD COLUMN description TEXT",
             "attempt": "ALTER TABLE tasks ADD COLUMN attempt INTEGER NOT NULL DEFAULT 0",
             "verification_status": (
                 "ALTER TABLE tasks ADD COLUMN verification_status TEXT NOT NULL DEFAULT 'not_run'"
@@ -912,10 +993,37 @@ class SQLiteStorage:
             "pause_requested": (
                 "ALTER TABLE tasks ADD COLUMN pause_requested INTEGER NOT NULL DEFAULT 0"
             ),
+            "repository_id": "ALTER TABLE tasks ADD COLUMN repository_id TEXT",
+            "base_branch": "ALTER TABLE tasks ADD COLUMN base_branch TEXT",
+            "assignee_user_id": "ALTER TABLE tasks ADD COLUMN assignee_user_id TEXT",
+            "jira_key": "ALTER TABLE tasks ADD COLUMN jira_key TEXT",
+            "created_by": "ALTER TABLE tasks ADD COLUMN created_by TEXT",
+            "acceptance_criteria_json": (
+                "ALTER TABLE tasks ADD COLUMN acceptance_criteria_json TEXT"
+            ),
+            "verification_json": "ALTER TABLE tasks ADD COLUMN verification_json TEXT",
         }
         for column, statement in migrations.items():
             if column not in columns:
                 connection.execute(statement)
+
+    @staticmethod
+    def _create_repository_table(connection: sqlite3.Connection) -> None:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS repositories (
+                repository_id TEXT PRIMARY KEY,
+                slug TEXT NOT NULL UNIQUE,
+                display_name TEXT NOT NULL,
+                source_type TEXT NOT NULL,
+                source TEXT NOT NULL,
+                default_branch TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
 
     @staticmethod
     def _create_or_migrate_message_queue(connection: sqlite3.Connection) -> None:

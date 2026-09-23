@@ -203,8 +203,13 @@ def test_phase2_message_queue_migrates_idempotently(tmp_path: Path) -> None:
     storage.initialize()  # second open: no change
     assert _snapshot(db) == (first_tables, first_schema)
 
-    for key in ("events", "tasks", "message_queue"):
+    for key in ("events", "message_queue"):
         assert first_tables[key] == before_tables[key]  # every row preserved as-is
+    # Additive task columns preserve every legacy value in its original position.
+    assert all(
+        migrated[: len(original)] == original
+        for migrated, original in zip(first_tables["tasks"], before_tables["tasks"], strict=True)
+    )
     assert "UNIQUE (task_id, actor_id, client_message_id)" in str(first_schema)
     assert {"users", "auth_tokens", "web_sessions", "task_presence"} <= set(first_tables)
 

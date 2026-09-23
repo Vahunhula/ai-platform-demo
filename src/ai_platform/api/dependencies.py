@@ -9,6 +9,7 @@ from ai_platform.application import ApplicationContext
 from ai_platform.controls import TaskControlService
 from ai_platform.conversation import ConversationService
 from ai_platform.runner import TaskTurnRunner
+from ai_platform.task_creation import TaskCreationService
 
 
 def get_context(request: Request) -> ApplicationContext:
@@ -33,8 +34,13 @@ def get_runner(request: Request) -> TaskTurnRunner | None:
     return request.app.state.runner
 
 
+def get_task_creation(request: Request) -> TaskCreationService:
+    return request.app.state.task_creation
+
+
 ContextDependency = Annotated[ApplicationContext, Depends(get_context)]
 ConversationDependency = Annotated[ConversationService, Depends(get_conversation)]
 PresenterDependency = Annotated[Presenter, Depends(get_presenter)]
 ControlsDependency = Annotated[TaskControlService, Depends(get_controls)]
 RunnerDependency = Annotated[TaskTurnRunner | None, Depends(get_runner)]
+TaskCreationDependency = Annotated[TaskCreationService, Depends(get_task_creation)]

@@ -143,6 +143,27 @@ class AuthService:
             rows = connection.execute("SELECT * FROM users ORDER BY username").fetchall()
         return [self._user(row) for row in rows]
 
+    def assignable_users(self) -> list[UserRecord]:
+        """Return enabled users with developer capability, never auth material."""
+
+        return [
+            user
+            for user in self.list_users()
+            if user.enabled and user.role.can_modify_tasks
+        ]
+
+    def assignable_user(self, user_id: str) -> UserRecord:
+        with self.storage.transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM users WHERE user_id = ? AND enabled = 1", (user_id,)
+            ).fetchone()
+        if row is None:
+            raise UserManagementError("Unknown or disabled assignee")
+        user = self._user(row)
+        if not user.role.can_modify_tasks:
+            raise UserManagementError("Assignee must have developer capability")
+        return user
+
     def set_enabled(self, username: str, enabled: bool) -> UserRecord:
         """Disabling also revokes every session of the user immediately."""
 

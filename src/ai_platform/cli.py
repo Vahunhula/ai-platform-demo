@@ -21,6 +21,7 @@ from ai_platform.events import ActorType, Event
 from ai_platform.identity import HumanIdentity, LocalIdentityProvider
 from ai_platform.locks import ExecutionLockManager
 from ai_platform.models import TaskDefinition
+from ai_platform.repositories import RepositoryError
 from ai_platform.sessions import TaskSession, TaskSessionError, TurnOutcome
 from ai_platform.workspace import WorkspaceError
 
@@ -218,6 +219,67 @@ users_app = typer.Typer(no_args_is_help=True, help="Manage web users (Demo 2 aut
 tokens_app = typer.Typer(no_args_is_help=True, help="Issue and revoke web login access tokens.")
 app.add_typer(users_app, name="users")
 app.add_typer(tokens_app, name="auth-token")
+
+repositories_app = typer.Typer(
+    no_args_is_help=True, help="Manage trusted local repository templates."
+)
+app.add_typer(repositories_app, name="repository")
+
+
+def _repository_call[T](operation: Callable[[], T]) -> T:
+    try:
+        return operation()
+    except RepositoryError as error:
+        _exit_with_error(error)
+        raise
+
+
+@repositories_app.command("list")
+def repository_list() -> None:
+    """List registered repositories without exposing server source paths."""
+
+    table = Table(show_header=True, header_style="bold cyan")
+    for column in ("SLUG", "DISPLAY NAME", "TYPE", "DEFAULT BRANCH", "ENABLED"):
+        table.add_column(column)
+    for repository in _application_context().repositories.list():
+        table.add_row(
+            repository.slug,
+            escape(repository.display_name),
+            repository.source_type,
+            repository.default_branch,
+            "yes" if repository.enabled else "no",
+        )
+    console.print(table)
+
+
+@repositories_app.command("add")
+def repository_add(
+    slug: str = typer.Option(..., "--slug"),
+    display_name: str = typer.Option(..., "--display-name"),
+    source: Path = typer.Option(..., "--source"),  # noqa: B008
+    default_branch: str = typer.Option(..., "--default-branch"),
+) -> None:
+    """Register a server-side local Git repository or directory template."""
+
+    context = _application_context()
+    repository = _repository_call(
+        lambda: context.repositories.register_local(
+            slug, display_name, source, default_branch
+        )
+    )
+    console.print(
+        f"Repository [bold]{repository.slug}[/bold] registered as {repository.id}."
+    )
+
+
+@repositories_app.command("disable")
+def repository_disable(slug: str) -> None:
+    """Disable task creation from a registered repository."""
+
+    repository = _repository_call(
+        lambda: _application_context().repositories.disable(slug)
+    )
+    console.print(f"Repository {repository.slug} disabled.")
 
 
 def _auth_service() -> AuthService:

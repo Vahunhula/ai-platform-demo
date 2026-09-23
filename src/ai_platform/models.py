@@ -75,7 +75,7 @@ class VerificationConfig(BaseModel):
                 path.is_absolute()
                 or ".." in path.parts
                 or target.startswith("-")
-                or path.suffix != ".py"
+                or not path.parts
             ):
                 raise ValueError(f"Unsafe pytest target: {target!r}")
         return targets
@@ -113,6 +113,7 @@ class TaskRecord(BaseModel):
 
     task_id: str
     title: str
+    description: str | None = None
     difficulty: TaskDifficulty
     status: TaskStatus
     selected_tier: ModelTier | None = None
@@ -120,6 +121,13 @@ class TaskRecord(BaseModel):
     attempt: int = 0
     verification_status: VerificationStatus = VerificationStatus.NOT_RUN
     workspace_path: str | None = None
+    repository_id: str | None = None
+    base_branch: str | None = None
+    assignee_user_id: str | None = None
+    jira_key: str | None = None
+    created_by: str | None = None
+    acceptance_criteria: list[str] | None = None
+    verification: VerificationConfig | None = None
     active_execution: ExecutionKind | None = None
     execution_owner: str | None = None
     execution_id: str | None = None
@@ -131,6 +139,20 @@ class TaskRecord(BaseModel):
     pause_requested: bool = False
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+    def managed_definition(self) -> TaskDefinition | None:
+        """Build the definition stored for a browser-created task, if this is one."""
+
+        if self.description is None or self.verification is None:
+            return None
+        return TaskDefinition(
+            id=self.task_id,
+            title=self.title,
+            description=self.description,
+            difficulty=self.difficulty,
+            acceptance_criteria=self.acceptance_criteria or ["Complete the requested work"],
+            verification=self.verification,
+        )
 
     @property
     def agent_running(self) -> bool:

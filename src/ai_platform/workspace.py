@@ -5,6 +5,8 @@ import re
 import shutil
 import stat
 import subprocess
+import tarfile
+import tempfile
 from abc import ABC, abstractmethod
 from hashlib import sha256
 from pathlib import Path
@@ -90,28 +92,37 @@ class LocalWorkspaceProvider(WorkspaceProvider):
         self.root = root.resolve()
         self.source_repository = source_repository.resolve()
 
-    def create(self, task_id: str) -> Path:
+    def create(
+        self,
+        task_id: str,
+        source_repository: Path | None = None,
+        base_branch: str | None = None,
+    ) -> Path:
         workspace = self.get_path(task_id)
         if workspace.exists():
             raise WorkspaceExistsError(
                 f"{task_id} already has a workspace. Use 'ai-platform attach {task_id}' "
                 f"or explicitly reset it with 'ai-platform reset {task_id}'."
             )
-        if not self.source_repository.is_dir():
-            raise WorkspaceError(f"Source repository does not exist: {self.source_repository}")
+        source = (source_repository or self.source_repository).resolve()
+        if not source.is_dir():
+            raise WorkspaceError("Registered repository source does not exist")
         git = shutil.which("git")
         if not git:
             raise WorkspaceError("Git is required for task workspace tracking but was not found")
 
         self.root.mkdir(parents=True, exist_ok=True)
         try:
-            shutil.copytree(
-                self.source_repository,
-                workspace,
-                ignore=shutil.ignore_patterns(
-                    "__pycache__", "*.pyc", ".pytest_cache", ".ruff_cache"
-                ),
-            )
+            if base_branch is None:
+                shutil.copytree(
+                    source,
+                    workspace,
+                    ignore=shutil.ignore_patterns(
+                        "__pycache__", "*.pyc", ".pytest_cache", ".ruff_cache"
+                    ),
+                )
+            else:
+                self._export_git_template(source, base_branch, workspace, git)
             self._prepare_shared_tree(workspace)
             self._initialize_git(workspace, git)
         except Exception:
@@ -119,6 +130,42 @@ class LocalWorkspaceProvider(WorkspaceProvider):
                 shutil.rmtree(workspace)
             raise
         return workspace
+
+    def _export_git_template(
+        self, source: Path, branch: str, workspace: Path, git: str
+    ) -> None:
+        """Export a registered directory exactly as it exists on a validated branch."""
+
+        top = self._run_git(source, git, "rev-parse", "--show-toplevel").stdout.strip()
+        repository_root = Path(top).resolve()
+        relative = source.relative_to(repository_root)
+        arguments = ["archive", "--format=tar", branch]
+        if relative != Path("."):
+            arguments.extend(["--", relative.as_posix()])
+        archive = subprocess.run(
+            [git, "-c", f"safe.directory={repository_root}", *arguments],
+            cwd=repository_root,
+            check=False,
+            capture_output=True,
+            timeout=30,
+            shell=False,
+        )
+        if archive.returncode != 0:
+            raise WorkspaceError("Git could not export the registered repository branch")
+        temporary = Path(tempfile.mkdtemp(prefix=".provision-", dir=self.root))
+        try:
+            archive_path = temporary / "repository.tar"
+            archive_path.write_bytes(archive.stdout)
+            extracted = temporary / "content"
+            extracted.mkdir()
+            with tarfile.open(archive_path) as bundle:
+                bundle.extractall(extracted, filter="data")
+            exported = extracted / relative if relative != Path(".") else extracted
+            if not exported.is_dir():
+                raise WorkspaceError("Registered repository path is absent from the branch")
+            shutil.move(str(exported), workspace)
+        finally:
+            shutil.rmtree(temporary, ignore_errors=True)
 
     def exists(self, task_id: str) -> bool:
         return self.get_path(task_id).is_dir()
@@ -236,4 +283,29 @@ class LocalWorkspaceProvider(WorkspaceProvider):
         if completed.returncode != 0:
             detail = (completed.stderr or completed.stdout).strip()[:1000]
             raise WorkspaceError(f"Git {' '.join(arguments)} failed: {detail}")
+        return completed
+
+    @staticmethod
+    def _run_git(
+        workspace: Path, executable: str, *arguments: str
+    ) -> subprocess.CompletedProcess[str]:
+        repository_root = next(
+            (
+                candidate
+                for candidate in (workspace, *workspace.parents)
+                if (candidate / ".git").exists()
+            ),
+            workspace,
+        )
+        completed = subprocess.run(
+            [executable, "-c", f"safe.directory={repository_root.resolve()}", *arguments],
+            cwd=workspace,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            shell=False,
+        )
+        if completed.returncode != 0:
+            raise WorkspaceError("Git repository inspection failed")
         return completed

@@ -28,6 +28,37 @@ export interface PresenceResponse {
   viewers: PresenceUser[];
 }
 
+export interface RepositoryOption {
+  id: string;
+  slug: string;
+  display_name: string;
+  default_branch: string;
+  enabled: boolean;
+}
+
+export interface AssignableUser {
+  id: string;
+  username: string;
+  display_name: string;
+}
+
+export interface CreateTaskRequest {
+  title: string;
+  description: string;
+  repository_id: string;
+  base_branch: string;
+  assignee_user_id: string;
+  jira_key: string | null;
+}
+
+export interface CreateTaskResponse extends CreateTaskRequest {
+  id: string;
+  status: "READY";
+  created_by: string;
+  created_at: string;
+  workspace_ready: true;
+}
+
 export interface TaskListItem {
   id: string;
   title: string;

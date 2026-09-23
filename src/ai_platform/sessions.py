@@ -17,6 +17,7 @@ from ai_platform.graph import TaskGraphState, run_task_graph
 from ai_platform.identity import HumanIdentity
 from ai_platform.locks import ExecutionLockManager, LockAcquisition
 from ai_platform.models import ExecutionKind, TaskDefinition, TaskRecord, TaskStatus
+from ai_platform.repositories import RepositoryService
 from ai_platform.router import ModelRouter
 from ai_platform.storage import SQLiteStorage
 from ai_platform.task_loader import get_task
@@ -114,6 +115,7 @@ class TaskSessionService:
         workspaces: LocalWorkspaceProvider,
         router: ModelRouter,
         executor_factory: Callable[[], AgentExecutor],
+        repositories: RepositoryService | None = None,
         lock_manager: ExecutionLockManager | None = None,
     ) -> None:
         self.settings = settings
@@ -122,6 +124,7 @@ class TaskSessionService:
         self.workspaces = workspaces
         self.router = router
         self.executor_factory = executor_factory
+        self.repositories = repositories
         self.locks = lock_manager or ExecutionLockManager(
             storage,
             heartbeat_seconds=settings.lock_heartbeat_seconds,
@@ -193,10 +196,12 @@ class TaskSessionService:
 
         task = self._definition(task_id)
         record = self._record(task.id)
-        if self.workspaces.exists(task.id):
+        if self.workspaces.exists(task.id) and record.repository_id is None:
             raise TaskSessionError(
                 f"{task.id} already has a workspace. Attach to it or reset it explicitly."
             )
+        if record.repository_id is not None and not self.workspaces.exists(task.id):
+            raise TaskSessionError(f"{task.id} is missing its provisioned workspace")
         if record.status is not TaskStatus.READY:
             raise TaskSessionError(
                 f"{task.id} is {record.status.value.upper()}; reset it before a new start."
@@ -539,8 +544,17 @@ class TaskSessionService:
         workspace_existed = self.workspaces.exists(task.id)
         try:
             self.workspaces.destroy(task.id)
-            # Resets runtime state and releases the lock in one atomic update.
-            self.storage.reset_task_runtime(task.id, owner=lock.owner_token)
+            if record.repository_id:
+                if self.repositories is None:
+                    raise TaskSessionError("Repository registry is unavailable")
+                repository = self.repositories.get(record.repository_id)
+                workspace = self.workspaces.create(
+                    task.id, Path(repository.source), record.base_branch
+                )
+                self.storage.reset_managed_task_runtime(task.id, workspace, lock.owner_token)
+            else:
+                # Resets runtime state and releases the lock in one atomic update.
+                self.storage.reset_task_runtime(task.id, owner=lock.owner_token)
         except BaseException:
             self.storage.release_execution(task.id, lock.owner_token)
             raise
@@ -765,8 +779,12 @@ class TaskSessionService:
     def _definition(self, task_id: str) -> TaskDefinition:
         try:
             return get_task(self.definitions, task_id)
-        except KeyError as error:
-            raise TaskNotFoundError(f"Unknown task ID: {task_id}") from error
+        except KeyError:
+            record = self.storage.get_task(task_id.upper())
+            definition = record.managed_definition() if record else None
+            if definition is None:
+                raise TaskNotFoundError(f"Unknown task ID: {task_id}") from None
+            return definition
 
     def _record(self, task_id: str) -> TaskRecord:
         record = self.storage.get_task(task_id)

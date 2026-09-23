@@ -37,6 +37,62 @@ class UserResponse(BaseModel):
     can_modify_tasks: bool
 
 
+class AssignableUserResponse(BaseModel):
+    id: str
+    username: str
+    display_name: str
+
+
+class RepositoryResponse(BaseModel):
+    id: str
+    slug: str
+    display_name: str
+    default_branch: str
+    enabled: bool
+
+
+class CreateTaskRequest(BaseModel):
+    """A browser request contains registry/user IDs, never actors or paths."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    title: str = Field(min_length=1, max_length=200)
+    description: str = Field(min_length=1, max_length=10_000)
+    repository_id: str = Field(min_length=1, max_length=80)
+    base_branch: str = Field(min_length=1, max_length=200)
+    assignee_user_id: str = Field(min_length=1, max_length=80)
+    jira_key: str | None = Field(default=None, max_length=80)
+
+    @field_validator("title", "description", "repository_id", "base_branch", "assignee_user_id")
+    @classmethod
+    def required_trimmed(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Field must not be blank")
+        return value
+
+    @field_validator("jira_key")
+    @classmethod
+    def optional_trimmed(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return value.strip() or None
+
+
+class CreateTaskResponse(BaseModel):
+    id: str
+    title: str
+    description: str
+    repository_id: str
+    base_branch: str
+    assignee_user_id: str
+    jira_key: str | None
+    status: Literal["READY"]
+    created_by: str
+    created_at: datetime
+    workspace_ready: Literal[True] = True
+
+
 class PresenceUser(BaseModel):
     user_id: str
     username: str

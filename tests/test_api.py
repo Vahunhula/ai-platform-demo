@@ -256,6 +256,7 @@ def test_mutation_routes_are_exactly_auth_presence_messages_and_controls() -> No
     assert mutations == {
         ("/api/auth/login", "POST"),
         ("/api/auth/logout", "POST"),
+        ("/api/tasks", "POST"),
         *(
             (f"/api/tasks/{{task_id}}/{name}", "POST")
             for name in (

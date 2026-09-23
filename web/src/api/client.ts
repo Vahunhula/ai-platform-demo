@@ -1,5 +1,7 @@
 import type {
   ConfigResponse,
+  CreateTaskRequest,
+  CreateTaskResponse,
   ControlRequest,
   ControlResponse,
   ConversationMessage,
@@ -9,6 +11,8 @@ import type {
   PostMessageRequest,
   PostMessageResponse,
   PresenceResponse,
+  RepositoryOption,
+  AssignableUser,
   TaskDetail,
   TaskListItem,
 } from "../types/api";
@@ -79,6 +83,12 @@ export const api = {
   heartbeat: (taskId: string) => request<PresenceResponse>(`${task(taskId)}/presence`, post()),
   getConfig: (signal?: AbortSignal) => request<ConfigResponse>("/api/config", { signal }),
   listTasks: (signal?: AbortSignal) => request<TaskListItem[]>("/api/tasks", { signal }),
+  listRepositories: (signal?: AbortSignal) =>
+    request<RepositoryOption[]>("/api/repositories", { signal }),
+  listAssignableUsers: (signal?: AbortSignal) =>
+    request<AssignableUser[]>("/api/users/assignable", { signal }),
+  createTask: (body: CreateTaskRequest) =>
+    request<CreateTaskResponse>("/api/tasks", post(body)),
   getTask: (taskId: string, signal?: AbortSignal) => request<TaskDetail>(task(taskId), { signal }),
   getEvents: (taskId: string, signal?: AbortSignal) =>
     request<PlatformEvent[]>(`${task(taskId)}/events`, { signal }),

@@ -13,6 +13,13 @@ database-enforced correctness across API processes. See
 [docs/demo2-ui.md](docs/demo2-ui.md) for architecture, API contracts, development
 commands, and current limitations.
 
+Demo 2.5 Phase 1 adds administrator-registered local Git templates and browser
+task creation. A developer selects a registered repository, its validated base
+branch, and an enabled developer assignee; the server generates the task ID and
+provisions an isolated workspace before returning success. Existing DEMO-1/2/3
+tasks remain file-defined and keep their original lazy-workspace behavior. See
+the "Demo 2.5 Phase 1" section of `docs/demo2-ui.md` for commands and contracts.
+
 The central rule is:
 
 ```text
