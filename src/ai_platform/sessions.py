@@ -16,11 +16,18 @@ from ai_platform.executors import AgentExecutor, AgentExecutorError
 from ai_platform.graph import TaskGraphState, run_task_graph
 from ai_platform.identity import HumanIdentity
 from ai_platform.locks import ExecutionLockManager, LockAcquisition
-from ai_platform.models import ExecutionKind, TaskDefinition, TaskRecord, TaskStatus
+from ai_platform.models import (
+    ExecutionKind,
+    ModelSelection,
+    TaskDefinition,
+    TaskRecord,
+    TaskStatus,
+)
 from ai_platform.repositories import RepositoryService
 from ai_platform.router import ModelRouter
 from ai_platform.storage import SQLiteStorage
 from ai_platform.task_loader import get_task
+from ai_platform.workflow import WorkflowPhase
 from ai_platform.workspace import FileChange, LocalWorkspaceProvider
 
 _CONTEXT_EVENT_LIMIT = 12
@@ -101,6 +108,7 @@ class PreparedTurn:
     execution_id: str
     executor: AgentExecutor
     continuation: bool
+    selection: ModelSelection
     through_sequence_id: int | None = None
 
 
@@ -138,9 +146,7 @@ class TaskSessionService:
         record = self._record(definition.id)
         workspace = self.resolve_workspace(definition.id, record=record)
         changed_files = (
-            self.workspaces.get_changed_files(definition.id)
-            if workspace.is_dir()
-            else []
+            self.workspaces.get_changed_files(definition.id) if workspace.is_dir() else []
         )
         return TaskSession(
             definition=definition,
@@ -245,6 +251,9 @@ class TaskSessionService:
             raise TaskSessionError(
                 f"{task.id} is {record.status.value.upper()}; reset it before a new start."
             )
+        selection = self.router.resolve(
+            task.id, WorkflowPhase.IMPLEMENTATION, storage=self.storage
+        )
         executor = self._preflight_executor()
         execution_id = execution_id or str(uuid4())
         lock = self.locks.acquire(
@@ -256,7 +265,7 @@ class TaskSessionService:
         )
         if not lock.acquired:
             raise self._lock_error(task.id, lock)
-        return PreparedTurn(task, human, lock.owner_token, execution_id, executor, False)
+        return PreparedTurn(task, human, lock.owner_token, execution_id, executor, False, selection)
 
     def run_prepared(self, prepared: PreparedTurn) -> TurnOutcome:
         """Run a prepared turn to its end; the writer lock is always released."""
@@ -267,6 +276,7 @@ class TaskSessionService:
             prepared.owner,
             prepared.execution_id,
             prepared.executor,
+            prepared.selection,
             continuation=prepared.continuation,
             through_sequence_id=prepared.through_sequence_id,
         )
@@ -395,9 +405,7 @@ class TaskSessionService:
                 f"{task.id} is currently being modified by Claude. Pause it before takeover."
             )
         if record.status is not TaskStatus.PAUSED_BY_HUMAN:
-            raise TaskSessionError(
-                f"{task.id} must be PAUSED_BY_HUMAN before opening a shell"
-            )
+            raise TaskSessionError(f"{task.id} must be PAUSED_BY_HUMAN before opening a shell")
         execution_id = str(uuid4())
         lock = self.locks.acquire(
             task.id,
@@ -490,6 +498,9 @@ class TaskSessionService:
         if record.status is not TaskStatus.PAUSED_BY_HUMAN:
             raise TaskSessionError(f"{task.id} is not PAUSED_BY_HUMAN")
         content = self._validate_message(message) if message is not None else None
+        selection = self.router.resolve(
+            task.id, WorkflowPhase.IMPLEMENTATION, storage=self.storage
+        )
         executor = self._preflight_executor()
         execution_id = execution_id or str(uuid4())
         lock = self.locks.acquire(
@@ -509,7 +520,7 @@ class TaskSessionService:
                 {"message": content},
             )
         self._append_human_event(task.id, EventType.HUMAN_RESUMED, human)
-        return PreparedTurn(task, human, lock.owner_token, execution_id, executor, True)
+        return PreparedTurn(task, human, lock.owner_token, execution_id, executor, True, selection)
 
     def reject(self, task_id: str, message: str, human: HumanIdentity) -> TurnOutcome:
         """Record review rejection and continue against the same workspace."""
@@ -534,9 +545,7 @@ class TaskSessionService:
         content = self._validate_message(message)
         record = self._record(task.id)
         if record.status is not TaskStatus.WAITING_FOR_HUMAN:
-            raise TaskSessionError(
-                f"{task.id} must be WAITING_FOR_HUMAN before review rejection"
-            )
+            raise TaskSessionError(f"{task.id} must be WAITING_FOR_HUMAN before review rejection")
         prepared = self._prepare_continuation(
             task, human, {TaskStatus.WAITING_FOR_HUMAN}, execution_id=execution_id
         )
@@ -663,6 +672,9 @@ class TaskSessionService:
         execution_id: str | None = None,
         through_sequence_id: int | None = None,
     ) -> PreparedTurn | TurnOutcome:
+        selection = self.router.resolve(
+            task.id, WorkflowPhase.IMPLEMENTATION, storage=self.storage
+        )
         executor = self._preflight_executor()
         execution_id = execution_id or str(uuid4())
         lock = self.locks.acquire(
@@ -691,6 +703,7 @@ class TaskSessionService:
             execution_id,
             executor,
             True,
+            selection,
             through_sequence_id,
         )
 
@@ -701,6 +714,7 @@ class TaskSessionService:
         owner: str,
         execution_id: str,
         executor: AgentExecutor,
+        selection: ModelSelection,
         *,
         continuation: bool,
         through_sequence_id: int | None = None,
@@ -728,6 +742,7 @@ class TaskSessionService:
                     recent_agent_messages=agent_messages,
                     human_workspace_changed=human_workspace_changed,
                     workspace_path=workspace,
+                    resolved_selection=selection,
                 )
         except KeyboardInterrupt:
             previous = self._record(task.id).status
@@ -924,9 +939,7 @@ class TaskSessionService:
         if not content:
             raise TaskSessionError("Message must not be empty")
         if len(content) > MAX_MESSAGE_LENGTH:
-            raise TaskSessionError(
-                f"Message must be {MAX_MESSAGE_LENGTH} characters or fewer"
-            )
+            raise TaskSessionError(f"Message must be {MAX_MESSAGE_LENGTH} characters or fewer")
         return content
 
     _validate_message = validate_message

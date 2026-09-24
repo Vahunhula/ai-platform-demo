@@ -5,6 +5,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from ai_platform.models import LogicalModel, ModelResolutionSource
 from ai_platform.sessions import MAX_MESSAGE_LENGTH
 from ai_platform.workflow import ArtifactKind, ChecklistResult, WorkflowPhase
 
@@ -166,6 +167,48 @@ class TaskDetailResponse(TaskListItem):
     messaging: MessagingState
     actions: TaskActions
     created_at: datetime
+    default_model_selection: LogicalModel
+
+
+class ModelCatalogResponse(BaseModel):
+    logical_id: LogicalModel
+    display_name: str
+    provider: str | None
+    enabled: bool
+
+
+class ModelPreferenceRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    selection: LogicalModel
+
+
+class ResolvedModelResponse(BaseModel):
+    requested_selection: LogicalModel
+    effective_selection: LogicalModel
+    provider: str
+    concrete_model_id: str
+    source: ModelResolutionSource
+
+
+class PhaseModelRoutingResponse(BaseModel):
+    phase: WorkflowPhase
+    selection: LogicalModel
+    resolved: ResolvedModelResponse | None = None
+    error: str | None = None
+
+
+class TaskModelRoutingResponse(BaseModel):
+    task_id: str
+    default_model_selection: LogicalModel
+    phases: list[PhaseModelRoutingResponse]
+
+
+class ModelPreferenceUpdateResponse(BaseModel):
+    task_id: str
+    selection: LogicalModel
+    phase: WorkflowPhase | None = None
+    changed: bool
+    applies_to_next_turn: Literal[True] = True
 
 
 class EventResponse(BaseModel):

@@ -71,9 +71,9 @@ def _run(
 @pytest.mark.parametrize(
     ("task_id", "expected_tier", "expected_model"),
     [
-        ("DEMO-1", ModelTier.CHEAP, "haiku-test"),
+        ("DEMO-1", ModelTier.DEFAULT, "sonnet-test"),
         ("DEMO-2", ModelTier.DEFAULT, "sonnet-test"),
-        ("DEMO-3", ModelTier.STRONG, "opus-test"),
+        ("DEMO-3", ModelTier.DEFAULT, "sonnet-test"),
     ],
 )
 def test_forwards_routed_model_and_reaches_human_review(
@@ -117,8 +117,8 @@ def test_failed_verification_retries_current_workspace_then_passes(tmp_path: Pat
     [
         (
             "DEMO-1",
-            ModelTier.DEFAULT,
-            [ModelTier.CHEAP, ModelTier.CHEAP, ModelTier.DEFAULT],
+            ModelTier.STRONG,
+            [ModelTier.DEFAULT, ModelTier.DEFAULT, ModelTier.STRONG],
         ),
         (
             "DEMO-2",
@@ -151,12 +151,10 @@ def test_repeated_failures_escalate_then_pass(
     assert escalated[0].metadata["previous_tier"] == expected_tiers[0].value
     assert escalated[0].metadata["new_tier"] == fix_tier.value
     assert escalated[0].metadata["failed_attempt_count"] == 2
-    assert [event.sequence_id for event in events] == sorted(
-        event.sequence_id for event in events
-    )
+    assert [event.sequence_id for event in events] == sorted(event.sequence_id for event in events)
 
 
-def test_continuation_keeps_current_escalated_tier_and_new_execution_id(
+def test_continuation_resolves_again_and_uses_new_execution_id(
     tmp_path: Path,
 ) -> None:
     task = _task("DEMO-1")
@@ -188,7 +186,7 @@ def test_continuation_keeps_current_escalated_tier_and_new_execution_id(
         for event in storage.get_events(task.id)
         if event.event_type in {EventType.MODEL_SELECTED, EventType.MODEL_ESCALATED}
     ]
-    assert model_events == [EventType.MODEL_SELECTED, EventType.MODEL_ESCALATED]
+    assert model_events == [EventType.MODEL_SELECTED, EventType.MODEL_SELECTED]
 
 
 def test_strong_exhaustion_after_two_attempts_marks_task_failed(tmp_path: Path) -> None:
@@ -197,7 +195,7 @@ def test_strong_exhaustion_after_two_attempts_marks_task_failed(tmp_path: Path) 
     state, storage, _workspaces = _run(tmp_path, _task("DEMO-3"), executor)
 
     assert state["status"] == TaskStatus.FAILED.value
-    assert len(executor.requests) == 2
+    assert len(executor.requests) == 4
     record = storage.get_task("DEMO-3")
     assert record is not None
     assert record.status is TaskStatus.FAILED

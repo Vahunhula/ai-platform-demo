@@ -98,6 +98,14 @@ _COMMON_PUBLIC_METADATA = {
     "from_phase",
     "to_phase",
     "transition_mode",
+    "old_selection",
+    "new_selection",
+    "phase",
+    "requested_selection",
+    "effective_selection",
+    "provider",
+    "resolution_source",
+    "workflow_phase",
 }
 _TEST_EVENTS = {EventType.TEST_STARTED, EventType.TEST_PASSED, EventType.TEST_FAILED}
 # A path component continues with these characters; a placeholder must not cut one in half.
@@ -268,6 +276,7 @@ class Presenter:
                 }
             ),
             created_at=record.created_at,
+            default_model_selection=record.default_model_selection,
         )
 
     def _verification_result(self, events: list[Event]) -> VerificationResultResponse | None:

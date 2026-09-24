@@ -18,14 +18,22 @@ from ai_platform.api.schemas import (
     CreateTaskResponse,
     DiffResponse,
     EventResponse,
+    ModelPreferenceRequest,
+    ModelPreferenceUpdateResponse,
+    PhaseModelRoutingResponse,
     PhaseTransitionRequest,
     PhaseTransitionResponse,
+    ResolvedModelResponse,
     TaskDetailResponse,
     TaskListItem,
+    TaskModelRoutingResponse,
 )
 from ai_platform.api.security import DeveloperDependency, UserDependency
+from ai_platform.model_preferences import ModelPreferenceService
+from ai_platform.models import LogicalModel
+from ai_platform.router import ModelRoutingError
 from ai_platform.task_creation import CreateTaskCommand
-from ai_platform.workflow import TransitionMode
+from ai_platform.workflow import TransitionMode, WorkflowPhase
 from ai_platform.workflow_services import (
     ChecklistService,
     WorkflowArtifactService,
@@ -95,6 +103,82 @@ def get_events(
 def get_diff(task_id: str, context: ContextDependency) -> DiffResponse:
     definition = context.sessions.get_definition(task_id)
     return DiffResponse(task_id=definition.id, diff=context.sessions.get_diff(task_id))
+
+
+_MODEL_PHASES = (
+    WorkflowPhase.BRAINSTORM,
+    WorkflowPhase.PLAN,
+    WorkflowPhase.IMPLEMENTATION,
+    WorkflowPhase.REVIEW,
+)
+
+
+@router.get("/{task_id}/model-routing", response_model=TaskModelRoutingResponse)
+def get_model_routing(task_id: str, context: ContextDependency) -> TaskModelRoutingResponse:
+    task_id = context.sessions.get_definition(task_id).id
+    record = context.storage.get_task(task_id)
+    preferences = {
+        item.phase: item.model_selection
+        for item in context.storage.list_phase_model_preferences(task_id)
+    }
+    phases: list[PhaseModelRoutingResponse] = []
+    for phase in _MODEL_PHASES:
+        selection = preferences.get(phase, LogicalModel.AUTO)
+        try:
+            resolved = context.model_router.resolve(task_id, phase)
+            result = ResolvedModelResponse(
+                requested_selection=resolved.requested_selection,
+                effective_selection=resolved.effective_selection,
+                provider=resolved.provider,
+                concrete_model_id=resolved.model,
+                source=resolved.resolution_source,
+            )
+            phases.append(
+                PhaseModelRoutingResponse(phase=phase, selection=selection, resolved=result)
+            )
+        except ModelRoutingError as error:
+            phases.append(
+                PhaseModelRoutingResponse(phase=phase, selection=selection, error=str(error))
+            )
+    return TaskModelRoutingResponse(
+        task_id=task_id,
+        default_model_selection=record.default_model_selection,
+        phases=phases,
+    )
+
+
+@router.put("/{task_id}/model-routing/default", response_model=ModelPreferenceUpdateResponse)
+def set_default_model(
+    task_id: str,
+    body: ModelPreferenceRequest,
+    context: ContextDependency,
+    user: DeveloperDependency,
+) -> ModelPreferenceUpdateResponse:
+    task_id = context.sessions.get_definition(task_id).id
+    changed = ModelPreferenceService(context.storage, context.model_catalog).set_default(
+        task_id, body.selection, user
+    )
+    return ModelPreferenceUpdateResponse(task_id=task_id, selection=body.selection, changed=changed)
+
+
+@router.put(
+    "/{task_id}/model-routing/phases/{phase}",
+    response_model=ModelPreferenceUpdateResponse,
+)
+def set_phase_model(
+    task_id: str,
+    phase: WorkflowPhase,
+    body: ModelPreferenceRequest,
+    context: ContextDependency,
+    user: DeveloperDependency,
+) -> ModelPreferenceUpdateResponse:
+    task_id = context.sessions.get_definition(task_id).id
+    changed = ModelPreferenceService(context.storage, context.model_catalog).set_phase(
+        task_id, phase, body.selection, user
+    )
+    return ModelPreferenceUpdateResponse(
+        task_id=task_id, phase=phase, selection=body.selection, changed=changed
+    )
 
 
 @router.post("/{task_id}/phase", response_model=PhaseTransitionResponse)

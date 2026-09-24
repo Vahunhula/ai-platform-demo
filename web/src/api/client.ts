@@ -15,6 +15,9 @@ import type {
   AssignableUser,
   TaskDetail,
   TaskListItem,
+  LogicalModel,
+  ModelCatalogEntry,
+  TaskModelRouting,
 } from "../types/api";
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/$/, "");
@@ -73,6 +76,12 @@ const post = (body?: unknown): RequestInit => ({
   body: body === undefined ? undefined : JSON.stringify(body),
 });
 
+const put = (body: unknown): RequestInit => ({
+  method: "PUT",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify(body),
+});
+
 const task = (taskId: string) => `/api/tasks/${encodeURIComponent(taskId)}`;
 
 export const api = {
@@ -90,6 +99,13 @@ export const api = {
   createTask: (body: CreateTaskRequest) =>
     request<CreateTaskResponse>("/api/tasks", post(body)),
   getTask: (taskId: string, signal?: AbortSignal) => request<TaskDetail>(task(taskId), { signal }),
+  listModels: (signal?: AbortSignal) => request<ModelCatalogEntry[]>("/api/models", { signal }),
+  getModelRouting: (taskId: string, signal?: AbortSignal) =>
+    request<TaskModelRouting>(`${task(taskId)}/model-routing`, { signal }),
+  setDefaultModel: (taskId: string, selection: LogicalModel) =>
+    request(`${task(taskId)}/model-routing/default`, put({ selection })),
+  setPhaseModel: (taskId: string, phase: string, selection: LogicalModel) =>
+    request(`${task(taskId)}/model-routing/phases/${phase}`, put({ selection })),
   getEvents: (taskId: string, signal?: AbortSignal) =>
     request<PlatformEvent[]>(`${task(taskId)}/events`, { signal }),
   getDiff: (taskId: string, signal?: AbortSignal) =>

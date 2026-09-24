@@ -5,6 +5,7 @@ import { usePresence } from "./api/usePresence";
 import { type StreamState, useTaskStream } from "./api/useTaskStream";
 import { ChatPanel } from "./components/ChatPanel";
 import { TaskOverview } from "./components/TaskOverview";
+import { ModelRoutingPanel } from "./components/ModelRoutingPanel";
 import { TaskControls } from "./components/TaskControls";
 import { TaskSidebar } from "./components/TaskSidebar";
 import { NewTaskDialog } from "./components/NewTaskDialog";
@@ -338,6 +339,7 @@ function App({ user, onSignOut }: AppProps) {
               </section>
 
               <TaskOverview detail={detail} />
+              <ModelRoutingPanel taskId={detail.id} user={user} />
 
               <section className="activity-panel">
                 <div className="tabs" role="tablist" aria-label="Task activity">

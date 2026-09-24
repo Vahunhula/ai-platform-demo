@@ -13,8 +13,10 @@ from time import monotonic, sleep
 from ai_platform.events import ActorType, Event, EventType
 from ai_platform.models import (
     ExecutionKind,
+    LogicalModel,
     MessageStatus,
     ModelSelection,
+    PhaseModelPreference,
     QueuedMessage,
     TaskDefinition,
     TaskRecord,
@@ -114,6 +116,7 @@ class SQLiteStorage:
                     difficulty TEXT NOT NULL,
                     status TEXT NOT NULL,
                     workflow_phase TEXT NOT NULL DEFAULT 'BRAINSTORM',
+                    default_model_selection TEXT NOT NULL DEFAULT 'AUTO',
                     selected_tier TEXT,
                     selected_model TEXT,
                     attempt INTEGER NOT NULL DEFAULT 0,
@@ -137,6 +140,7 @@ class SQLiteStorage:
             self._migrate_task_columns(connection)
             self._create_repository_table(connection)
             self._create_workflow_tables(connection)
+            self._create_model_routing_table(connection)
             connection.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_events_task_sequence
@@ -180,10 +184,10 @@ class SQLiteStorage:
                 """
                 INSERT INTO tasks (
                     task_id, title, description, difficulty, status, workflow_phase,
-                    workspace_path,
+                    default_model_selection, workspace_path,
                     repository_id, base_branch, assignee_user_id, jira_key, created_by,
                     acceptance_criteria_json, verification_json, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record.task_id,
@@ -192,6 +196,7 @@ class SQLiteStorage:
                     record.difficulty.value,
                     record.status.value,
                     record.workflow_phase.value,
+                    record.default_model_selection.value,
                     record.workspace_path,
                     record.repository_id,
                     record.base_branch,
@@ -215,8 +220,9 @@ class SQLiteStorage:
             cursor = connection.execute(
                 """
                 INSERT OR IGNORE INTO tasks (
-                    task_id, title, difficulty, status, workflow_phase, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    task_id, title, difficulty, status, workflow_phase,
+                    default_model_selection, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     task.id,
@@ -224,6 +230,7 @@ class SQLiteStorage:
                     task.difficulty.value,
                     TaskStatus.READY.value,
                     WorkflowPhase.IMPLEMENTATION.value,
+                    LogicalModel.AUTO.value,
                     now,
                     now,
                 ),
@@ -489,6 +496,135 @@ class SQLiteStorage:
             )
             if cursor.rowcount != 1:
                 raise KeyError(task_id)
+
+    def get_phase_model_preference(
+        self, task_id: str, phase: WorkflowPhase
+    ) -> PhaseModelPreference | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM task_phase_model_preferences
+                WHERE task_id = ? AND phase = ?
+                """,
+                (task_id, phase.value),
+            ).fetchone()
+        return self._phase_model_preference_from_row(row) if row else None
+
+    def list_phase_model_preferences(self, task_id: str) -> list[PhaseModelPreference]:
+        with self._connect() as connection:
+            if (
+                connection.execute("SELECT 1 FROM tasks WHERE task_id = ?", (task_id,)).fetchone()
+                is None
+            ):
+                raise KeyError(task_id)
+            rows = connection.execute(
+                """
+                SELECT * FROM task_phase_model_preferences
+                WHERE task_id = ? ORDER BY phase
+                """,
+                (task_id,),
+            ).fetchall()
+        return [self._phase_model_preference_from_row(row) for row in rows]
+
+    def set_default_model_selection(
+        self,
+        task_id: str,
+        selection: LogicalModel,
+        actor_id: str,
+        display_name: str,
+    ) -> bool:
+        """Atomically update user intent and append one audit event unless unchanged."""
+
+        with self._connect(immediate=True) as connection:
+            row = connection.execute(
+                "SELECT default_model_selection FROM tasks WHERE task_id = ?", (task_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(task_id)
+            old = LogicalModel(row["default_model_selection"])
+            if old is selection:
+                return False
+            now = datetime.now(UTC)
+            connection.execute(
+                """
+                UPDATE tasks SET default_model_selection = ?, updated_at = ?
+                WHERE task_id = ?
+                """,
+                (selection.value, now.isoformat(), task_id),
+            )
+            self._insert_event(
+                connection,
+                Event(
+                    task_id=task_id,
+                    timestamp=now,
+                    event_type=EventType.TASK_MODEL_DEFAULT_CHANGED,
+                    actor_type=ActorType.HUMAN,
+                    actor_id=actor_id,
+                    metadata={
+                        "old_selection": old.value,
+                        "new_selection": selection.value,
+                        "display_name": display_name,
+                    },
+                ),
+            )
+            return True
+
+    def set_phase_model_preference(
+        self,
+        task_id: str,
+        phase: WorkflowPhase,
+        selection: LogicalModel,
+        actor_id: str,
+        display_name: str,
+    ) -> bool:
+        """Atomically upsert one override and its audit history unless unchanged."""
+
+        with self._connect(immediate=True) as connection:
+            if (
+                connection.execute("SELECT 1 FROM tasks WHERE task_id = ?", (task_id,)).fetchone()
+                is None
+            ):
+                raise KeyError(task_id)
+            row = connection.execute(
+                """
+                SELECT model_selection FROM task_phase_model_preferences
+                WHERE task_id = ? AND phase = ?
+                """,
+                (task_id, phase.value),
+            ).fetchone()
+            old = LogicalModel(row["model_selection"]) if row else None
+            if old is selection:
+                return False
+            now = datetime.now(UTC)
+            connection.execute(
+                """
+                INSERT INTO task_phase_model_preferences (
+                    task_id, phase, model_selection, updated_by, updated_at
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(task_id, phase) DO UPDATE SET
+                    model_selection = excluded.model_selection,
+                    updated_by = excluded.updated_by,
+                    updated_at = excluded.updated_at
+                """,
+                (task_id, phase.value, selection.value, actor_id, now.isoformat()),
+            )
+            self._insert_event(
+                connection,
+                Event(
+                    task_id=task_id,
+                    timestamp=now,
+                    event_type=EventType.PHASE_MODEL_OVERRIDE_CHANGED,
+                    actor_type=ActorType.HUMAN,
+                    actor_id=actor_id,
+                    metadata={
+                        "phase": phase.value,
+                        "old_selection": old.value if old else None,
+                        "new_selection": selection.value,
+                        "display_name": display_name,
+                    },
+                ),
+            )
+            return True
 
     def update_workspace_path(self, task_id: str, workspace_path: Path) -> None:
         """Persist the configured task workspace path."""
@@ -1108,6 +1244,7 @@ class SQLiteStorage:
             difficulty=row["difficulty"],
             status=row["status"],
             workflow_phase=row["workflow_phase"],
+            default_model_selection=row["default_model_selection"],
             selected_tier=row["selected_tier"],
             selected_model=row["selected_model"],
             attempt=row["attempt"],
@@ -1154,6 +1291,16 @@ class SQLiteStorage:
             execution_id=row["execution_id"],
             error=row["error"],
             created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+    @staticmethod
+    def _phase_model_preference_from_row(row: sqlite3.Row) -> PhaseModelPreference:
+        return PhaseModelPreference(
+            task_id=row["task_id"],
+            phase=row["phase"],
+            model_selection=row["model_selection"],
+            updated_by=row["updated_by"],
             updated_at=row["updated_at"],
         )
 
@@ -1275,6 +1422,9 @@ class SQLiteStorage:
             ),
             "verification_json": "ALTER TABLE tasks ADD COLUMN verification_json TEXT",
             "workflow_phase": "ALTER TABLE tasks ADD COLUMN workflow_phase TEXT",
+            "default_model_selection": (
+                "ALTER TABLE tasks ADD COLUMN default_model_selection TEXT NOT NULL DEFAULT 'AUTO'"
+            ),
         }
         for column, statement in migrations.items():
             if column not in columns:
@@ -1315,12 +1465,50 @@ class SQLiteStorage:
             BEGIN SELECT RAISE(ABORT, 'invalid workflow phase'); END
             """
         )
+        model_values = ", ".join(f"'{selection.value}'" for selection in LogicalModel)
+        connection.execute(
+            f"""
+            CREATE TRIGGER IF NOT EXISTS tasks_default_model_valid_insert
+            BEFORE INSERT ON tasks
+            WHEN NEW.default_model_selection IS NULL
+              OR NEW.default_model_selection NOT IN ({model_values})
+            BEGIN SELECT RAISE(ABORT, 'invalid default model selection'); END
+            """
+        )
+        connection.execute(
+            f"""
+            CREATE TRIGGER IF NOT EXISTS tasks_default_model_valid_update
+            BEFORE UPDATE OF default_model_selection ON tasks
+            WHEN NEW.default_model_selection IS NULL
+              OR NEW.default_model_selection NOT IN ({model_values})
+            BEGIN SELECT RAISE(ABORT, 'invalid default model selection'); END
+            """
+        )
         connection.execute(
             f"""
             CREATE TRIGGER IF NOT EXISTS tasks_workflow_phase_valid_update
             BEFORE UPDATE OF workflow_phase ON tasks
             WHEN NEW.workflow_phase IS NULL OR NEW.workflow_phase NOT IN ({allowed})
             BEGIN SELECT RAISE(ABORT, 'invalid workflow phase'); END
+            """
+        )
+
+    @staticmethod
+    def _create_model_routing_table(connection: sqlite3.Connection) -> None:
+        phases = ", ".join(
+            f"'{phase.value}'" for phase in WorkflowPhase if phase is not WorkflowPhase.HUMAN_REVIEW
+        )
+        selections = ", ".join(f"'{selection.value}'" for selection in LogicalModel)
+        connection.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS task_phase_model_preferences (
+                task_id TEXT NOT NULL REFERENCES tasks(task_id),
+                phase TEXT NOT NULL CHECK (phase IN ({phases})),
+                model_selection TEXT NOT NULL CHECK (model_selection IN ({selections})),
+                updated_by TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (task_id, phase)
+            )
             """
         )
 

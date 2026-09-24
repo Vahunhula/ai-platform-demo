@@ -16,6 +16,7 @@ from ai_platform.api.routes.config import router as config_router
 from ai_platform.api.routes.controls import router as controls_router
 from ai_platform.api.routes.health import router as health_router
 from ai_platform.api.routes.messages import router as messages_router
+from ai_platform.api.routes.models import router as models_router
 from ai_platform.api.routes.presence import router as presence_router
 from ai_platform.api.routes.stream import router as stream_router
 from ai_platform.api.routes.tasks import router as tasks_router
@@ -33,8 +34,10 @@ from ai_platform.conversation import (
     IdempotencyConflictError,
     MessageNotAcceptedError,
 )
+from ai_platform.model_preferences import ModelPreferenceService
 from ai_platform.presence import PresenceService
 from ai_platform.repositories import RepositoryError
+from ai_platform.router import ModelRoutingError
 from ai_platform.runner import TaskTurnRunner
 from ai_platform.sessions import ExecutorUnavailableError, TaskNotFoundError, TaskSessionError
 from ai_platform.task_creation import (
@@ -69,6 +72,9 @@ def _wire(
         on_submitted=runner.wake if runner is not None else None,
     )
     application.state.controls = TaskControlService(context.sessions, context.storage, runner)
+    application.state.model_preferences = ModelPreferenceService(
+        context.storage, context.model_catalog
+    )
 
 
 def create_app(
@@ -159,6 +165,10 @@ def create_app(
     async def workflow_error(_request: Request, exc: WorkflowError) -> JSONResponse:
         return error(400, str(exc))
 
+    @application.exception_handler(ModelRoutingError)
+    async def model_routing_error(_request: Request, exc: ModelRoutingError) -> JSONResponse:
+        return error(400, str(exc))
+
     @application.exception_handler(RunnerUnavailableError)
     async def runner_unavailable(_request: Request, exc: RunnerUnavailableError) -> JSONResponse:
         return error(503, str(exc))
@@ -181,9 +191,7 @@ def create_app(
         return error(400, str(exc))
 
     @application.exception_handler(TaskProvisioningError)
-    async def provisioning_error(
-        _request: Request, exc: TaskProvisioningError
-    ) -> JSONResponse:
+    async def provisioning_error(_request: Request, exc: TaskProvisioningError) -> JSONResponse:
         return error(503, str(exc))
 
     @application.exception_handler(Exception)
@@ -199,6 +207,7 @@ def create_app(
     for router in (
         config_router,
         catalog_router,
+        models_router,
         tasks_router,
         messages_router,
         controls_router,

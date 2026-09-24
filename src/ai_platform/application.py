@@ -8,7 +8,7 @@ from ai_platform.events import ActorType, Event, EventType
 from ai_platform.executors import AgentExecutor, ClaudeAgentExecutor
 from ai_platform.models import TaskDefinition
 from ai_platform.repositories import RepositoryService
-from ai_platform.router import ModelRouter
+from ai_platform.router import ModelCatalog, ModelRouter
 from ai_platform.sessions import TaskSessionError, TaskSessionService
 from ai_platform.storage import SQLiteStorage
 from ai_platform.task_loader import load_tasks
@@ -24,6 +24,8 @@ class ApplicationContext:
     storage: SQLiteStorage
     workspaces: LocalWorkspaceProvider
     repositories: RepositoryService
+    model_catalog: ModelCatalog
+    model_router: ModelRouter
     sessions: TaskSessionService
 
 
@@ -61,24 +63,32 @@ def create_application_context(
         configured.demo_repository,
     )
     repositories = RepositoryService(storage, configured.workspace_root)
+    model_catalog = ModelCatalog.from_settings(configured)
+    model_router = ModelRouter.from_settings(configured, storage)
     sessions = TaskSessionService(
         configured,
         definitions,
         storage,
         workspaces,
-        ModelRouter.from_settings(configured),
+        model_router,
         executor_factory or (lambda: create_executor(configured)),
         repositories=repositories,
     )
     if lock_recovery_client is not None:
         sessions.recover_stale_locks(
             recovered_by=(
-                f"{lock_recovery_client}@{sessions.locks.hostname}:"
-                f"{sessions.locks.process_id}"
+                f"{lock_recovery_client}@{sessions.locks.hostname}:{sessions.locks.process_id}"
             )
         )
     return ApplicationContext(
-        configured, definitions, storage, workspaces, repositories, sessions
+        configured,
+        definitions,
+        storage,
+        workspaces,
+        repositories,
+        model_catalog,
+        model_router,
+        sessions,
     )
 
 

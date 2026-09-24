@@ -164,8 +164,7 @@ async def test_get_endpoints_do_not_mutate_task_state(
     client, context = api_client
     before_records = context.sessions.list_tasks()
     before_events = {
-        record.task_id: context.sessions.get_events(record.task_id)
-        for record in before_records
+        record.task_id: context.sessions.get_events(record.task_id) for record in before_records
     }
 
     assert (await client.get("/api/tasks")).status_code == 200
@@ -175,8 +174,7 @@ async def test_get_endpoints_do_not_mutate_task_state(
 
     assert context.sessions.list_tasks() == before_records
     assert {
-        record.task_id: context.sessions.get_events(record.task_id)
-        for record in before_records
+        record.task_id: context.sessions.get_events(record.task_id) for record in before_records
     } == before_events
 
 
@@ -195,9 +193,7 @@ async def test_unexpected_failure_returns_generic_500(
     token = provision(app)
     transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as quiet_client:
-        await quiet_client.post(
-            "/api/auth/login", json={"username": WEB_ACTOR, "token": token}
-        )
+        await quiet_client.post("/api/auth/login", json={"username": WEB_ACTOR, "token": token})
         response = await quiet_client.get("/api/tasks/DEMO-1/diff")
 
     assert response.status_code == 500
@@ -258,6 +254,8 @@ def test_mutation_routes_are_exactly_auth_presence_messages_and_controls() -> No
         ("/api/auth/login", "POST"),
         ("/api/auth/logout", "POST"),
         ("/api/tasks", "POST"),
+        ("/api/tasks/{task_id}/model-routing/default", "PUT"),
+        ("/api/tasks/{task_id}/model-routing/phases/{phase}", "PUT"),
         *(
             (f"/api/tasks/{{task_id}}/{name}", "POST")
             for name in (

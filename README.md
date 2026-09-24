@@ -2,6 +2,8 @@
 
 Demo 2.5 Phase 2 workflow domain behavior is documented in
 [`docs/demo25-phase2-domain.md`](docs/demo25-phase2-domain.md).
+Demo 2.5 Phase 2.1 model selection and routing is documented in
+[`docs/demo25-phase21-model-routing.md`](docs/demo25-phase21-model-routing.md).
 
 AI Platform Demo is a proof of concept for a shared, persistent, task-owned AI
 software-development workflow. Phase 5 deploys the Phase 4 orchestration and
@@ -382,8 +384,8 @@ recommended.
 | `AI_PLATFORM_CHECKPOINT_DB_PATH` | `data/langgraph-checkpoints.db` |
 | `AI_PLATFORM_EXECUTOR` | `claude` |
 | `AI_PLATFORM_CHEAP_MODEL` | `haiku` |
-| `AI_PLATFORM_DEFAULT_MODEL` | `sonnet` |
-| `AI_PLATFORM_STRONG_MODEL` | `opus` |
+| `AI_PLATFORM_CLAUDE_SONNET_MODEL` | `sonnet` |
+| `AI_PLATFORM_CLAUDE_OPUS_MODEL` | `opus` |
 | `AI_PLATFORM_AGENT_TIMEOUT_SECONDS` | `300` |
 | `AI_PLATFORM_AGENT_MAX_TURNS` | `8` |
 | `AI_PLATFORM_VERIFICATION_TIMEOUT_SECONDS` | `60` |

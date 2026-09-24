@@ -1202,3 +1202,15 @@ details summary {
   background: #f3f0f8;
   border-left-color: #8a78b5;
 }
+
+.model-routing {
+  padding: 16px;
+  border-top: 1px solid #dfe5e1;
+  background: #fbfcfb;
+}
+
+.model-routing h3 { margin: 0 0 12px; }
+.model-routing label { display: grid; gap: 5px; font-size: 12px; font-weight: 700; }
+.model-routing select { min-width: 150px; padding: 7px; border: 1px solid #c9d3cc; border-radius: 5px; }
+.phase-models { display: grid; grid-template-columns: repeat(4, minmax(145px, 1fr)); gap: 12px; margin-top: 14px; }
+.phase-models small { min-height: 14px; color: #647169; font-weight: 400; }

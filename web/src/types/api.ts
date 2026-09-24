@@ -112,6 +112,38 @@ export interface TaskDetail extends TaskListItem {
   messaging: MessagingState;
   actions: TaskActions;
   created_at: string;
+  default_model_selection: LogicalModel;
+}
+
+export type LogicalModel = "AUTO" | "CLAUDE_SONNET" | "CLAUDE_OPUS";
+export type AgentWorkflowPhase = "BRAINSTORM" | "PLAN" | "IMPLEMENTATION" | "REVIEW";
+
+export interface ModelCatalogEntry {
+  logical_id: LogicalModel;
+  display_name: string;
+  provider: string | null;
+  enabled: boolean;
+}
+
+export interface ModelResolution {
+  requested_selection: LogicalModel;
+  effective_selection: LogicalModel;
+  provider: string;
+  concrete_model_id: string;
+  source: "PHASE_OVERRIDE" | "TASK_DEFAULT" | "AUTO_POLICY";
+}
+
+export interface PhaseModelRouting {
+  phase: AgentWorkflowPhase;
+  selection: LogicalModel;
+  resolved: ModelResolution | null;
+  error: string | null;
+}
+
+export interface TaskModelRouting {
+  task_id: string;
+  default_model_selection: LogicalModel;
+  phases: PhaseModelRouting[];
 }
 
 export interface PlatformEvent {

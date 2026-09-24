@@ -73,12 +73,7 @@ class VerificationConfig(BaseModel):
 
         for target in targets:
             path = PurePosixPath(target.replace("\\", "/"))
-            if (
-                path.is_absolute()
-                or ".." in path.parts
-                or target.startswith("-")
-                or not path.parts
-            ):
+            if path.is_absolute() or ".." in path.parts or target.startswith("-") or not path.parts:
                 raise ValueError(f"Unsafe pytest target: {target!r}")
         return targets
 
@@ -102,12 +97,31 @@ class ModelTier(StrEnum):
     STRONG = "strong"
 
 
+class LogicalModel(StrEnum):
+    """Stable user-facing model aliases; never raw provider version IDs."""
+
+    AUTO = "AUTO"
+    CLAUDE_SONNET = "CLAUDE_SONNET"
+    CLAUDE_OPUS = "CLAUDE_OPUS"
+
+
+class ModelResolutionSource(StrEnum):
+    PHASE_OVERRIDE = "PHASE_OVERRIDE"
+    TASK_DEFAULT = "TASK_DEFAULT"
+    AUTO_POLICY = "AUTO_POLICY"
+
+
 class ModelSelection(BaseModel):
-    """The model tier and configured provider model chosen for a task."""
+    """A concrete, snapshotted execution target returned by the resolver."""
 
     tier: ModelTier
     model: str = Field(min_length=1)
     reason: str
+    requested_selection: LogicalModel = LogicalModel.AUTO
+    effective_selection: LogicalModel = LogicalModel.CLAUDE_SONNET
+    provider: str = "anthropic"
+    resolution_source: ModelResolutionSource = ModelResolutionSource.AUTO_POLICY
+    workflow_phase: WorkflowPhase = WorkflowPhase.IMPLEMENTATION
 
 
 class TaskRecord(BaseModel):
@@ -119,6 +133,7 @@ class TaskRecord(BaseModel):
     difficulty: TaskDifficulty
     status: TaskStatus
     workflow_phase: WorkflowPhase = WorkflowPhase.BRAINSTORM
+    default_model_selection: LogicalModel = LogicalModel.AUTO
     selected_tier: ModelTier | None = None
     selected_model: str | None = None
     attempt: int = 0
@@ -183,4 +198,14 @@ class QueuedMessage(BaseModel):
     execution_id: str | None = None
     error: str | None = None
     created_at: datetime
+    updated_at: datetime
+
+
+class PhaseModelPreference(BaseModel):
+    """One durable per-task workflow-phase routing preference."""
+
+    task_id: str
+    phase: WorkflowPhase
+    model_selection: LogicalModel
+    updated_by: str
     updated_at: datetime

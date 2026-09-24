@@ -19,15 +19,14 @@ from ai_platform.executors.base import (
 )
 from ai_platform.models import (
     ModelSelection,
-    ModelTier,
     TaskDefinition,
-    TaskDifficulty,
     TaskStatus,
     VerificationStatus,
 )
 from ai_platform.router import ModelRouter
 from ai_platform.storage import SQLiteStorage, ensure_group_writable_sqlite_files
 from ai_platform.verification import build_verification_command, verify_task
+from ai_platform.workflow import WorkflowPhase
 from ai_platform.workspace import WorkspaceProvider
 
 _MAX_EVENT_OUTPUT = 8000
@@ -45,6 +44,11 @@ class TaskGraphState(TypedDict, total=False):
     selected_tier: str
     selected_model: str
     selection_reason: str
+    requested_selection: str
+    effective_selection: str
+    model_provider: str
+    resolution_source: str
+    workflow_phase: str
     attempt: int
     turn_attempt: int
     tier_attempt: int
@@ -80,6 +84,7 @@ def run_task_graph(
     recent_agent_messages: list[str] | None = None,
     human_workspace_changed: bool = False,
     workspace_path: Path | None = None,
+    resolved_selection: ModelSelection | None = None,
 ) -> TaskGraphState:
     """Run one bounded initial or continuation turn for a durable TaskSession."""
 
@@ -87,6 +92,9 @@ def run_task_graph(
     attempts_per_tier = max_attempts_per_tier or max_attempts or 2
     current_execution_id = execution_id or str(uuid4())
     resolved_workspace = (workspace_path or workspace_provider.get_path(task.id)).resolve()
+    turn_selection = resolved_selection or router.resolve(
+        task.id, WorkflowPhase.IMPLEMENTATION, storage=storage
+    )
     if resolved_workspace != workspace_provider.get_path(task.id).resolve():
         raise ValueError("Resolved task workspace does not match the workspace provider")
     os.environ.setdefault("LANGGRAPH_STRICT_MSGPACK", "true")
@@ -110,6 +118,7 @@ def run_task_graph(
             continuation,
             current_execution_id,
             resolved_workspace,
+            turn_selection,
         )
         initial_state: TaskGraphState = {
             "task_id": task.id,
@@ -154,6 +163,7 @@ def _build_graph(
     continuation: bool,
     execution_id: str,
     resolved_workspace: Path,
+    turn_selection: ModelSelection,
 ):
     def load_task(_state: TaskGraphState) -> TaskGraphState:
         if continuation:
@@ -161,8 +171,6 @@ def _build_graph(
             if (
                 record is None
                 or not record.workspace_path
-                or record.selected_tier is None
-                or not record.selected_model
                 or not workspace_provider.exists(task.id)
             ):
                 return {"fatal_error": "Task continuation state or workspace is missing"}
@@ -180,9 +188,6 @@ def _build_graph(
                 "difficulty": task.difficulty.value,
                 "acceptance_criteria": task.acceptance_criteria,
                 "workspace_path": str(resolved_workspace),
-                "selected_tier": record.selected_tier.value,
-                "selected_model": record.selected_model,
-                "selection_reason": "Continue with the TaskSession's selected model tier",
                 "attempt": record.attempt,
                 "status": TaskStatus.ANALYZING.value,
                 "fatal_error": "",
@@ -234,23 +239,24 @@ def _build_graph(
             return {"fatal_error": _safe_error(error)}
 
     def select_model(state: TaskGraphState) -> TaskGraphState:
-        selection = router.select(TaskDifficulty(state["difficulty"]))
+        selection = turn_selection
         _record_selection(storage, task, selection, execution_id)
         return {
             "selected_tier": selection.tier.value,
             "selected_model": selection.model,
             "selection_reason": selection.reason,
+            "requested_selection": selection.requested_selection.value,
+            "effective_selection": selection.effective_selection.value,
+            "model_provider": selection.provider,
+            "resolution_source": selection.resolution_source.value,
+            "workflow_phase": selection.workflow_phase.value,
             "tier_attempt": 0,
         }
 
     def escalate_model(state: TaskGraphState) -> TaskGraphState:
-        previous = ModelSelection(
-            tier=ModelTier(state["selected_tier"]),
-            model=state["selected_model"],
-            reason=state["selection_reason"],
-        )
+        previous = _selection_from_state(state)
         failed_attempt_count = state.get("tier_attempt", 0)
-        selection = router.escalate(previous.tier, failed_attempt_count)
+        selection = router.escalate_selection(previous, failed_attempt_count)
         if selection is None:
             return {"fatal_error": "Strong model tier exhausted", "tier_attempt": 0}
         storage.update_model_selection(task.id, selection)
@@ -268,6 +274,11 @@ def _build_graph(
                     "new_model": selection.model,
                     "reason": selection.reason,
                     "failed_attempt_count": failed_attempt_count,
+                    "requested_selection": selection.requested_selection.value,
+                    "effective_selection": selection.effective_selection.value,
+                    "provider": selection.provider,
+                    "resolution_source": selection.resolution_source.value,
+                    "workflow_phase": selection.workflow_phase.value,
                 },
             )
         )
@@ -275,6 +286,11 @@ def _build_graph(
             "selected_tier": selection.tier.value,
             "selected_model": selection.model,
             "selection_reason": selection.reason,
+            "requested_selection": selection.requested_selection.value,
+            "effective_selection": selection.effective_selection.value,
+            "model_provider": selection.provider,
+            "resolution_source": selection.resolution_source.value,
+            "workflow_phase": selection.workflow_phase.value,
             "tier_attempt": 0,
         }
 
@@ -306,6 +322,11 @@ def _build_graph(
                         "continuation": state.get("continuation", False),
                         "tier": state["selected_tier"],
                         "model": state["selected_model"],
+                        "requested_selection": state["requested_selection"],
+                        "effective_selection": state["effective_selection"],
+                        "provider": state["model_provider"],
+                        "resolution_source": state["resolution_source"],
+                        "workflow_phase": state["workflow_phase"],
                         "sdk_version": preflight.sdk_version,
                         "authentication_method": preflight.authentication_method,
                     },
@@ -314,11 +335,7 @@ def _build_graph(
             result = executor.execute(
                 ExecutionRequest(
                     task=task,
-                    selection=ModelSelection(
-                        tier=state["selected_tier"],
-                        model=state["selected_model"],
-                        reason=state["selection_reason"],
-                    ),
+                    selection=_selection_from_state(state),
                     workspace_path=Path(state["workspace_path"]),
                     execution_id=execution_id,
                     attempt=attempt,
@@ -357,9 +374,7 @@ def _build_graph(
                     },
                 )
             )
-            _record_file_changes(
-                storage, workspace_provider, task.id, attempt, execution_id
-            )
+            _record_file_changes(storage, workspace_provider, task.id, attempt, execution_id)
             return {
                 "attempt": attempt,
                 "turn_attempt": turn_attempt,
@@ -385,9 +400,7 @@ def _build_graph(
                     },
                 )
             )
-            _record_file_changes(
-                storage, workspace_provider, task.id, attempt, execution_id
-            )
+            _record_file_changes(storage, workspace_provider, task.id, attempt, execution_id)
             return {
                 "attempt": attempt,
                 "turn_attempt": turn_attempt,
@@ -540,10 +553,10 @@ def _build_graph(
 
     def after_load(
         state: TaskGraphState,
-    ) -> Literal["prepare_workspace", "analyze_implement", "failed"]:
+    ) -> Literal["prepare_workspace", "select_model", "failed"]:
         if state.get("fatal_error"):
             return "failed"
-        return "analyze_implement" if state.get("continuation") else "prepare_workspace"
+        return "select_model" if state.get("continuation") else "prepare_workspace"
 
     def after_prepare(state: TaskGraphState) -> Literal["select_model", "failed"]:
         return "failed" if state.get("fatal_error") else "select_model"
@@ -555,16 +568,17 @@ def _build_graph(
 
     def after_verification(
         state: TaskGraphState,
-    ) -> Literal[
-        "waiting_for_human", "analyze_implement", "escalate_model", "paused", "failed"
-    ]:
+    ) -> Literal["waiting_for_human", "analyze_implement", "escalate_model", "paused", "failed"]:
         if storage.is_pause_requested(task.id):
             return "paused"
         if state.get("verification_passed"):
             return "waiting_for_human"
         if state.get("tier_attempt", 0) < max_attempts_per_tier:
             return "analyze_implement"
-        if router.next_tier(ModelTier(state["selected_tier"])) is not None:
+        if (
+            router.escalate_selection(_selection_from_state(state), state.get("tier_attempt", 0))
+            is not None
+        ):
             return "escalate_model"
         return "failed"
 
@@ -589,6 +603,19 @@ def _build_graph(
     builder.add_edge("paused", END)
     builder.add_edge("failed", END)
     return builder.compile(checkpointer=checkpointer)
+
+
+def _selection_from_state(state: TaskGraphState) -> ModelSelection:
+    return ModelSelection(
+        tier=state["selected_tier"],
+        model=state["selected_model"],
+        reason=state["selection_reason"],
+        requested_selection=state["requested_selection"],
+        effective_selection=state["effective_selection"],
+        provider=state["model_provider"],
+        resolution_source=state["resolution_source"],
+        workflow_phase=state["workflow_phase"],
+    )
 
 
 def _record_selection(

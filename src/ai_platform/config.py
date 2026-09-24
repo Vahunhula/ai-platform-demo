@@ -112,16 +112,20 @@ class Settings:
         return cls(
             project_root=root,
             tasks_path=_resolve_path(setting("AI_PLATFORM_TASK_FILE", "tasks.json"), root),
-            demo_repository=_resolve_path(
-                setting("AI_PLATFORM_DEMO_REPO", "demo_repo"), root
-            ),
+            demo_repository=_resolve_path(setting("AI_PLATFORM_DEMO_REPO", "demo_repo"), root),
             data_dir=data_dir,
             workspace_root=workspace_root,
             db_path=db_path,
             checkpoint_db_path=checkpoint_db_path,
             cheap_model=setting("AI_PLATFORM_CHEAP_MODEL", "haiku"),
-            default_model=setting("AI_PLATFORM_DEFAULT_MODEL", "sonnet"),
-            strong_model=setting("AI_PLATFORM_STRONG_MODEL", "opus"),
+            default_model=setting(
+                "AI_PLATFORM_CLAUDE_SONNET_MODEL",
+                setting("AI_PLATFORM_DEFAULT_MODEL", "sonnet"),
+            ),
+            strong_model=setting(
+                "AI_PLATFORM_CLAUDE_OPUS_MODEL",
+                setting("AI_PLATFORM_STRONG_MODEL", "opus"),
+            ),
             anthropic_api_key=values.get("ANTHROPIC_API_KEY") or None,
             executor=setting("AI_PLATFORM_EXECUTOR", "claude"),
             agent_timeout_seconds=_positive_int(values, "AI_PLATFORM_AGENT_TIMEOUT_SECONDS", 300),
@@ -129,9 +133,7 @@ class Settings:
             verification_timeout_seconds=_positive_int(
                 values, "AI_PLATFORM_VERIFICATION_TIMEOUT_SECONDS", 60
             ),
-            max_attempts_per_tier=_positive_int(
-                values, "AI_PLATFORM_MAX_ATTEMPTS_PER_TIER", 2
-            ),
+            max_attempts_per_tier=_positive_int(values, "AI_PLATFORM_MAX_ATTEMPTS_PER_TIER", 2),
             lock_heartbeat_seconds=heartbeat_seconds,
             lock_stale_seconds=stale_seconds,
             enable_runner=_flag(values, "AI_PLATFORM_ENABLE_RUNNER"),
