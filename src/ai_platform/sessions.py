@@ -136,9 +136,10 @@ class TaskSessionService:
 
         definition = self._definition(task_id)
         record = self._record(definition.id)
+        workspace = self.resolve_workspace(definition.id, record=record)
         changed_files = (
             self.workspaces.get_changed_files(definition.id)
-            if self.workspaces.exists(definition.id)
+            if workspace.is_dir()
             else []
         )
         return TaskSession(
@@ -169,10 +170,47 @@ class TaskSessionService:
         """Return the task workspace diff, or an empty diff before workspace creation."""
 
         task = self._definition(task_id)
-        self._record(task.id)
-        if not self.workspaces.exists(task.id):
+        workspace = self.resolve_workspace(task.id)
+        if not workspace.is_dir():
             return ""
         return self.workspaces.get_diff(task.id)
+
+    def resolve_workspace(
+        self,
+        task_id: str,
+        *,
+        record: TaskRecord | None = None,
+        require_exists: bool = False,
+    ) -> Path:
+        """Resolve the one authoritative workspace assigned to a task.
+
+        Legacy task rows predate managed repositories and may contain historical
+        paths from another deployment, so their identity remains the configured
+        workspace root plus task ID. Browser-created tasks are eagerly provisioned;
+        their persisted path must exist as an identity and must match that canonical
+        task path. A mismatch is an error, never a fallback to either location.
+        """
+
+        task = self._definition(task_id)
+        current = record or self._record(task.id)
+        canonical = self.workspaces.get_path(task.id).resolve()
+        if current.repository_id is not None:
+            if not current.workspace_path:
+                raise TaskSessionError(f"{task.id} has no persisted workspace identity")
+            persisted = Path(current.workspace_path).resolve()
+            if persisted != canonical:
+                raise TaskSessionError(f"{task.id} has an invalid workspace identity")
+            workspace = persisted
+        else:
+            workspace = canonical
+        if require_exists and not workspace.is_dir():
+            raise TaskSessionError(f"{task.id} is missing its provisioned workspace")
+        return workspace
+
+    def workspace_exists(self, task_id: str) -> bool:
+        """Return whether the task's authoritative workspace currently exists."""
+
+        return self.resolve_workspace(task_id).is_dir()
 
     def connect(self, task_id: str, human: HumanIdentity) -> Event:
         """Record that a human attached; this does not imply live presence."""
@@ -196,11 +234,12 @@ class TaskSessionService:
 
         task = self._definition(task_id)
         record = self._record(task.id)
-        if self.workspaces.exists(task.id) and record.repository_id is None:
+        workspace = self.resolve_workspace(task.id, record=record)
+        if workspace.is_dir() and record.repository_id is None:
             raise TaskSessionError(
                 f"{task.id} already has a workspace. Attach to it or reset it explicitly."
             )
-        if record.repository_id is not None and not self.workspaces.exists(task.id):
+        if record.repository_id is not None and not workspace.is_dir():
             raise TaskSessionError(f"{task.id} is missing its provisioned workspace")
         if record.status is not TaskStatus.READY:
             raise TaskSessionError(
@@ -311,9 +350,10 @@ class TaskSessionService:
 
         task = self._definition(task_id)
         record = self._record(task.id)
+        workspace = self.resolve_workspace(task.id, record=record)
         if record.status is TaskStatus.COMPLETED:
             raise TaskSessionError(f"{task.id} is already completed")
-        if record.status is TaskStatus.READY or not self.workspaces.exists(task.id):
+        if record.status is TaskStatus.READY or not workspace.is_dir():
             raise TaskSessionError(f"{task.id} has no active workspace to pause")
         if record.status is TaskStatus.PAUSED_BY_HUMAN and not record.agent_running:
             raise TaskSessionError(f"{task.id} is already paused")
@@ -375,7 +415,7 @@ class TaskSessionService:
             raise self._lock_error(task.id, lock)
 
         try:
-            workspace = self.workspaces.get_path(task.id)
+            workspace = self.resolve_workspace(task.id, require_exists=True)
             before = self.workspaces.snapshot(task.id)
             self._append_human_event(
                 task.id,
@@ -446,6 +486,7 @@ class TaskSessionService:
 
         task = self._definition(task_id)
         record = self._record(task.id)
+        self.resolve_workspace(task.id, record=record, require_exists=True)
         if record.status is not TaskStatus.PAUSED_BY_HUMAN:
             raise TaskSessionError(f"{task.id} is not PAUSED_BY_HUMAN")
         content = self._validate_message(message) if message is not None else None
@@ -526,6 +567,7 @@ class TaskSessionService:
 
         task = self._definition(task_id)
         record = self._record(task.id)
+        workspace = self.resolve_workspace(task.id, record=record)
         if record.active_execution is not None:
             raise TaskSessionError(f"{task.id} currently has an active workspace writer")
         # Hold the one-writer lock while the workspace is deleted, so no concurrent
@@ -540,8 +582,7 @@ class TaskSessionService:
         )
         if not lock.acquired:
             raise self._lock_error(task.id, lock)
-        workspace = self.workspaces.get_path(task.id)
-        workspace_existed = self.workspaces.exists(task.id)
+        workspace_existed = workspace.is_dir()
         try:
             self.workspaces.destroy(task.id)
             if record.repository_id:
@@ -669,6 +710,7 @@ class TaskSessionService:
         )
         human_workspace_changed = self._human_changed_workspace_since_last_agent(task.id)
         try:
+            workspace = self.resolve_workspace(task.id, require_exists=continuation)
             with self.locks.heartbeat(task.id, owner):
                 return run_task_graph(
                     task,
@@ -685,6 +727,7 @@ class TaskSessionService:
                     human_messages=human_messages,
                     recent_agent_messages=agent_messages,
                     human_workspace_changed=human_workspace_changed,
+                    workspace_path=workspace,
                 )
         except KeyboardInterrupt:
             previous = self._record(task.id).status

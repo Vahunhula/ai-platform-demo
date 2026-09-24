@@ -129,7 +129,7 @@ class TaskControlService:
 
         status = record.status
         writer = record.active_execution is not None
-        workspace = self.sessions.workspaces.exists(record.task_id)
+        workspace = self.sessions.workspace_exists(record.task_id)
         if action is ControlAction.START:
             if writer or status in _ACTIVE_STATUSES:
                 return "Task cannot be started because it is already running."

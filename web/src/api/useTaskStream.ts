@@ -36,6 +36,8 @@ export function useTaskStream(
   const [state, setState] = useState<StreamState>("idle");
   const handlersRef = useRef(handlers);
   handlersRef.current = handlers;
+  const taskIdRef = useRef(taskId);
+  taskIdRef.current = taskId;
 
   useEffect(() => {
     if (!taskId || afterSequence === null) {
@@ -80,6 +82,7 @@ export function useTaskStream(
       };
       source.addEventListener("platform_event", (message) => {
         heardFromServer();
+        if (taskIdRef.current !== id) return;
         const event = JSON.parse((message as MessageEvent<string>).data) as PlatformEvent;
         if (event.sequence_id <= cursor) return; // never deliver an event twice
         cursor = event.sequence_id;
@@ -87,6 +90,7 @@ export function useTaskStream(
       });
       source.addEventListener("conversation", () => {
         heardFromServer();
+        if (taskIdRef.current !== id) return;
         handlersRef.current.onConversation();
       });
       source.addEventListener("heartbeat", heardFromServer);

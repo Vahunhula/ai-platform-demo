@@ -153,6 +153,7 @@ function App({ user, onSignOut }: AppProps) {
       api.getMessages(selectedId, controller.signal),
     ])
       .then(([nextDetail, nextEvents, nextMessages]) => {
+        if (selectedRef.current !== selectedId) return;
         setDetail(nextDetail);
         setEvents(nextEvents);
         setMessages(nextMessages);

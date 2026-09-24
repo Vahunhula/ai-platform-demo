@@ -79,12 +79,16 @@ def run_task_graph(
     human_messages: list[str] | None = None,
     recent_agent_messages: list[str] | None = None,
     human_workspace_changed: bool = False,
+    workspace_path: Path | None = None,
 ) -> TaskGraphState:
     """Run one bounded initial or continuation turn for a durable TaskSession."""
 
     checkpoint_db_path.parent.mkdir(parents=True, exist_ok=True)
     attempts_per_tier = max_attempts_per_tier or max_attempts or 2
     current_execution_id = execution_id or str(uuid4())
+    resolved_workspace = (workspace_path or workspace_provider.get_path(task.id)).resolve()
+    if resolved_workspace != workspace_provider.get_path(task.id).resolve():
+        raise ValueError("Resolved task workspace does not match the workspace provider")
     os.environ.setdefault("LANGGRAPH_STRICT_MSGPACK", "true")
     connection = sqlite3.connect(checkpoint_db_path, check_same_thread=False)
     ensure_group_writable_sqlite_files(checkpoint_db_path)
@@ -105,6 +109,7 @@ def run_task_graph(
             actor_id,
             continuation,
             current_execution_id,
+            resolved_workspace,
         )
         initial_state: TaskGraphState = {
             "task_id": task.id,
@@ -116,6 +121,7 @@ def run_task_graph(
             "human_messages": human_messages or [],
             "recent_agent_messages": recent_agent_messages or [],
             "human_workspace_changed": human_workspace_changed,
+            "workspace_path": str(resolved_workspace),
             "agent_succeeded": False,
             "execution_cancelled": False,
             "agent_error": "",
@@ -147,6 +153,7 @@ def _build_graph(
     actor_id: str,
     continuation: bool,
     execution_id: str,
+    resolved_workspace: Path,
 ):
     def load_task(_state: TaskGraphState) -> TaskGraphState:
         if continuation:
@@ -172,7 +179,7 @@ def _build_graph(
                 "description": task.description,
                 "difficulty": task.difficulty.value,
                 "acceptance_criteria": task.acceptance_criteria,
-                "workspace_path": record.workspace_path,
+                "workspace_path": str(resolved_workspace),
                 "selected_tier": record.selected_tier.value,
                 "selected_model": record.selected_model,
                 "selection_reason": "Continue with the TaskSession's selected model tier",
@@ -209,7 +216,7 @@ def _build_graph(
         try:
             record = storage.get_task(task.id)
             if record and record.repository_id and workspace_provider.exists(task.id):
-                workspace = workspace_provider.get_path(task.id)
+                workspace = resolved_workspace
             else:
                 workspace = workspace_provider.create(task.id)
                 storage.update_workspace_path(task.id, workspace)
