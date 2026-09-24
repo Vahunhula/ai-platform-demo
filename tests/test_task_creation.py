@@ -24,6 +24,7 @@ from ai_platform.task_creation import (
     TaskCreationService,
     TaskProvisioningError,
 )
+from ai_platform.workflow import WorkflowPhase
 from ai_platform.workspace import WorkspaceError
 from tests.fakes import FakeAgentExecutor
 from tests.test_messaging import _client, _context
@@ -85,6 +86,8 @@ class IsolatedWritingExecutor(FakeAgentExecutor):
         super().__init__(fix_on_attempt=None)
 
     def execute(self, request: ExecutionRequest):
+        if request.phase is not WorkflowPhase.IMPLEMENTATION:
+            return super().execute(request)
         workspace = request.workspace_path
         marker = "agent-a.txt" if request.task.title == "Isolation A" else "agent-b.txt"
         (workspace / marker).write_text(request.task.id, encoding="utf-8")

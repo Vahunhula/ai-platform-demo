@@ -23,6 +23,7 @@ from ai_platform.api.schemas import (
     PhaseModelRoutingResponse,
     PhaseTransitionRequest,
     PhaseTransitionResponse,
+    ReadinessSummary,
     ResolvedModelResponse,
     TaskDetailResponse,
     TaskListItem,
@@ -87,7 +88,17 @@ def get_task(
     session = context.sessions.get_session(task_id)
     queued = queued_count(context.storage.list_queued_messages(session.definition.id))
     actions = controls.availability(session.record, user)
-    return presenter.task_detail(session, user, queued, actions)
+    evaluations = context.storage.list_checklist_evaluations(session.definition.id)
+    latest_readiness = (
+        ReadinessSummary(
+            phase=evaluations[-1].phase,
+            score=evaluations[-1].readiness.score,
+            eligible_for_auto_progression=evaluations[-1].readiness.eligible_for_auto_progression,
+        )
+        if evaluations
+        else None
+    )
+    return presenter.task_detail(session, user, queued, actions, latest_readiness=latest_readiness)
 
 
 @router.get("/{task_id}/events", response_model=list[EventResponse])

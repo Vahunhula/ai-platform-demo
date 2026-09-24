@@ -6,14 +6,21 @@ import pytest
 
 from ai_platform.approval import ApprovalError, approve_task
 from ai_platform.events import EventType
-from ai_platform.executors.base import ExecutionResult
+from ai_platform.executors.base import ExecutionRequest, ExecutionResult
 from ai_platform.graph import run_task_graph
 from ai_platform.models import ModelTier, TaskDefinition, TaskStatus, VerificationStatus
 from ai_platform.router import ModelRouter
 from ai_platform.storage import SQLiteStorage
 from ai_platform.task_loader import get_task, load_tasks
+from ai_platform.workflow import WorkflowPhase
 from ai_platform.workspace import LocalWorkspaceProvider
 from tests.fakes import FakeAgentExecutor
+
+
+def _phase_requests(
+    executor: FakeAgentExecutor, phase: WorkflowPhase
+) -> list[ExecutionRequest]:
+    return [request for request in executor.requests if request.phase is phase]
 
 
 class FatalFakeAgentExecutor(FakeAgentExecutor):
@@ -90,11 +97,17 @@ def test_forwards_routed_model_and_reaches_human_review(
     state, storage, _workspaces = _run(tmp_path, task, executor)
 
     assert state["status"] == TaskStatus.WAITING_FOR_HUMAN.value
-    assert executor.requests[0].selection.tier is expected_tier
-    assert executor.requests[0].selection.model == expected_model
+    implementation_requests = _phase_requests(executor, WorkflowPhase.IMPLEMENTATION)
+    assert implementation_requests[0].selection.tier is expected_tier
+    assert implementation_requests[0].selection.model == expected_model
     record = storage.get_task(task_id)
     assert record is not None
     assert record.verification_status is VerificationStatus.PASSED
+    # Legacy tasks skip Brainstorm/Plan and flow straight through Review to
+    # Human Review once Implementation's own gate passes (Phase 3, no human
+    # intervention required before Human Review).
+    assert record.workflow_phase is WorkflowPhase.HUMAN_REVIEW
+    assert len(_phase_requests(executor, WorkflowPhase.REVIEW)) == 1
     assert source_file.read_bytes() == source_before
 
 
@@ -104,10 +117,11 @@ def test_failed_verification_retries_current_workspace_then_passes(tmp_path: Pat
     state, storage, _workspaces = _run(tmp_path, _task("DEMO-1"), executor)
 
     assert state["status"] == TaskStatus.WAITING_FOR_HUMAN.value
-    assert len(executor.requests) == 2
-    assert executor.requests[1].previous_failure
+    implementation_requests = _phase_requests(executor, WorkflowPhase.IMPLEMENTATION)
+    assert len(implementation_requests) == 2
+    assert implementation_requests[1].previous_failure
     event_types = [event.event_type for event in storage.get_events("DEMO-1")]
-    assert event_types.count(EventType.AGENT_STARTED) == 2
+    assert event_types.count(EventType.AGENT_STARTED) == 3  # 2 implementation + 1 review
     assert EventType.TEST_FAILED in event_types
     assert EventType.TEST_PASSED in event_types
 
@@ -138,12 +152,18 @@ def test_repeated_failures_escalate_then_pass(
     state, storage, _workspaces = _run(tmp_path, _task(task_id), executor)
 
     assert state["status"] == TaskStatus.WAITING_FOR_HUMAN.value
-    assert [request.selection.tier for request in executor.requests] == expected_tiers
+    implementation_requests = _phase_requests(executor, WorkflowPhase.IMPLEMENTATION)
+    assert [request.selection.tier for request in implementation_requests] == expected_tiers
     record = storage.get_task(task_id)
     assert record is not None
     assert record.selected_tier is fix_tier
     events = storage.get_events(task_id)
-    selected = [event for event in events if event.event_type is EventType.MODEL_SELECTED]
+    selected = [
+        event
+        for event in events
+        if event.event_type is EventType.MODEL_SELECTED
+        and event.metadata.get("workflow_phase") == WorkflowPhase.IMPLEMENTATION.value
+    ]
     escalated = [event for event in events if event.event_type is EventType.MODEL_ESCALATED]
     assert len(selected) == 1
     assert selected[0].metadata["tier"] == expected_tiers[0].value
@@ -157,10 +177,24 @@ def test_repeated_failures_escalate_then_pass(
 def test_continuation_resolves_again_and_uses_new_execution_id(
     tmp_path: Path,
 ) -> None:
+    """A gate-stopped Implementation resumes, resolving its model fresh each turn.
+
+    The initial turn never fixes the bug: bounded retries and AUTO escalation
+    exhaust, which is a gate stop (WAITING_FOR_HUMAN), not a system FAILED
+    (Phase 3, section 17/33). A continuation turn then fixes it and the task
+    flows on through Review to Human Review.
+    """
+
     task = _task("DEMO-1")
-    initial = FakeAgentExecutor(fix_on_tier=ModelTier.DEFAULT)
-    _state, storage, workspaces = _run(tmp_path, task, initial)
+    initial = FakeAgentExecutor(fix_on_attempt=None)
+    initial_state, storage, workspaces = _run(tmp_path, task, initial)
+    assert initial_state["status"] == TaskStatus.WAITING_FOR_HUMAN.value
+    record = storage.get_task(task.id)
+    assert record is not None
+    assert record.workflow_phase is WorkflowPhase.IMPLEMENTATION
+    assert record.verification_status is VerificationStatus.FAILED
     initial_execution_ids = {request.execution_id for request in initial.requests}
+    assert initial_execution_ids and len(initial_execution_ids) == 1
     continuation = FakeAgentExecutor()
 
     state = run_task_graph(
@@ -177,29 +211,46 @@ def test_continuation_resolves_again_and_uses_new_execution_id(
     )
 
     assert state["status"] == TaskStatus.WAITING_FOR_HUMAN.value
-    assert initial_execution_ids and len(initial_execution_ids) == 1
-    assert continuation.requests[0].selection.tier is ModelTier.DEFAULT
-    assert continuation.requests[0].execution_id == "continuation-execution"
-    assert continuation.requests[0].selection.tier is not ModelTier.CHEAP
-    model_events = [
-        event.event_type
-        for event in storage.get_events(task.id)
-        if event.event_type in {EventType.MODEL_SELECTED, EventType.MODEL_ESCALATED}
+    continuation_implementation = _phase_requests(continuation, WorkflowPhase.IMPLEMENTATION)
+    assert continuation_implementation[0].selection.tier is ModelTier.DEFAULT
+    assert continuation_implementation[0].execution_id == "continuation-execution"
+    final = storage.get_task(task.id)
+    assert final is not None
+    assert final.workflow_phase is WorkflowPhase.HUMAN_REVIEW
+    events = storage.get_events(task.id)
+    implementation_selected = [
+        event
+        for event in events
+        if event.event_type is EventType.MODEL_SELECTED
+        and event.metadata.get("workflow_phase") == WorkflowPhase.IMPLEMENTATION.value
     ]
-    assert model_events == [EventType.MODEL_SELECTED, EventType.MODEL_SELECTED]
+    assert len(implementation_selected) == 2  # one per turn: resolved again, not cached
+    assert len([e for e in events if e.event_type is EventType.MODEL_ESCALATED]) == 1
 
 
-def test_strong_exhaustion_after_two_attempts_marks_task_failed(tmp_path: Path) -> None:
+def test_strong_exhaustion_after_two_attempts_is_a_gate_stop_not_a_failure(
+    tmp_path: Path,
+) -> None:
+    """Exhausted bounded retries/escalation are a BUSINESS/GATE STOP (Phase 3,
+    section 17/33): the task waits for a human, it is not marked FAILED.
+    """
+
     executor = FakeAgentExecutor(fix_on_attempt=None)
 
     state, storage, _workspaces = _run(tmp_path, _task("DEMO-3"), executor)
 
-    assert state["status"] == TaskStatus.FAILED.value
-    assert len(executor.requests) == 4
+    assert state["status"] == TaskStatus.WAITING_FOR_HUMAN.value
+    implementation_requests = _phase_requests(executor, WorkflowPhase.IMPLEMENTATION)
+    assert len(implementation_requests) == 4
     record = storage.get_task("DEMO-3")
     assert record is not None
-    assert record.status is TaskStatus.FAILED
+    assert record.status is TaskStatus.WAITING_FOR_HUMAN
+    assert record.workflow_phase is WorkflowPhase.IMPLEMENTATION
     assert record.verification_status is VerificationStatus.FAILED
+    checklists = storage.list_checklist_evaluations("DEMO-3")
+    latest = checklists[-1]
+    assert "deterministic_verification_passed" in latest.readiness.blocking_failures
+    assert not latest.readiness.eligible_for_auto_progression
 
 
 def test_fatal_agent_failure_skips_verification_and_retry(tmp_path: Path) -> None:

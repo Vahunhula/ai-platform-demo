@@ -8,6 +8,7 @@ from typing import Any, Protocol
 from pydantic import BaseModel, ConfigDict, Field
 
 from ai_platform.models import ModelSelection, TaskDefinition
+from ai_platform.workflow import WorkflowPhase
 
 
 class AgentActivityType(StrEnum):
@@ -43,6 +44,7 @@ class ExecutionRequest(BaseModel):
     workspace_path: Path
     execution_id: str = Field(min_length=1)
     attempt: int = Field(ge=1)
+    phase: WorkflowPhase = WorkflowPhase.IMPLEMENTATION
     previous_failure: str | None = None
     continuation: bool = False
     human_messages: list[str] = Field(default_factory=list)
@@ -50,6 +52,10 @@ class ExecutionRequest(BaseModel):
     current_verification: str = "not_run"
     workspace_diff: str = ""
     human_workspace_changed: bool = False
+    # Phase 3: structured, bounded phase context (never the raw prior-phase transcript).
+    upstream_artifacts: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    output_schema: dict[str, Any] | None = None
+    format_repair_attempt: bool = False
     cancellation_requested: Callable[[], bool] | None = Field(default=None, exclude=True)
 
 
@@ -64,6 +70,8 @@ class ExecutionResult(BaseModel):
     error: str | None = None
     fatal: bool = False
     cancelled: bool = False
+    # Native structured output (Phase 3), present when the request set output_schema.
+    structured_output: dict[str, Any] | None = None
 
 
 class AgentExecutorError(RuntimeError):

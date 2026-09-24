@@ -21,6 +21,7 @@ from ai_platform.api.schemas import (
     EventResponse,
     MessageResponse,
     MessagingState,
+    ReadinessSummary,
     TaskActions,
     TaskDetailResponse,
     TaskListItem,
@@ -248,6 +249,8 @@ class Presenter:
         user: AuthenticatedUser,
         queued_messages: int,
         actions: dict[ControlAction, ActionAvailability],
+        *,
+        latest_readiness: ReadinessSummary | None = None,
     ) -> TaskDetailResponse:
         record = session.record
         reason = ConversationService.acceptance(record)
@@ -277,6 +280,7 @@ class Presenter:
             ),
             created_at=record.created_at,
             default_model_selection=record.default_model_selection,
+            latest_readiness=latest_readiness,
         )
 
     def _verification_result(self, events: list[Event]) -> VerificationResultResponse | None:

@@ -25,15 +25,24 @@ from ai_platform.config import Settings
 from ai_platform.events import ActorType, Event, EventType
 from ai_platform.executors.base import ExecutionRequest, ExecutionResult
 from ai_platform.identity import HumanIdentity
-from ai_platform.models import MessageStatus, TaskStatus
+from ai_platform.models import LogicalModel, MessageStatus, TaskStatus
 from ai_platform.runner import TaskTurnRunner
+from ai_platform.workflow import WorkflowPhase
 from tests.fakes import FakeAgentExecutor
 
 WEB_ACTOR = "web-tester"
 
 
 class GatedExecutor(FakeAgentExecutor):
-    """Fake executor whose turns can be held open, recording writer concurrency."""
+    """Fake executor whose turns can be held open, recording writer concurrency.
+
+    Phase 3: one turn can call the executor more than once (e.g. Implementation
+    then Review), all under the same ``execution_id``. Gating still holds open
+    only the first call of a gated turn -- concurrency tests only care about a
+    turn being "in flight" -- and lets the rest of that turn's calls through
+    once released, so a single ``permits.release()`` still unblocks a whole
+    turn as these tests expect.
+    """
 
     def __init__(self) -> None:
         super().__init__(fix_on_attempt=1)
@@ -43,6 +52,7 @@ class GatedExecutor(FakeAgentExecutor):
         self.active = 0
         self.max_active = 0
         self._lock = threading.Lock()
+        self._gated_execution_ids: set[str] = set()
 
     def execute(self, request: ExecutionRequest) -> ExecutionResult:
         with self._lock:
@@ -50,7 +60,10 @@ class GatedExecutor(FakeAgentExecutor):
             self.max_active = max(self.max_active, self.active)
         try:
             self.started.put(request)
-            if self.gated and not self.permits.acquire(timeout=30):
+            with self._lock:
+                first_call_of_turn = request.execution_id not in self._gated_execution_ids
+                self._gated_execution_ids.add(request.execution_id)
+            if self.gated and first_call_of_turn and not self.permits.acquire(timeout=30):
                 raise RuntimeError("test never released the gated executor")
             return super().execute(request)
         finally:
@@ -99,9 +112,36 @@ def _context(
     )
 
 
-def _waiting_for_human(context: ApplicationContext, task_id: str = "DEMO-1") -> None:
-    """Drive a task to WAITING_FOR_HUMAN through the real core with the fake executor."""
+def _waiting_for_human(
+    context: ApplicationContext,
+    task_id: str = "DEMO-1",
+    *,
+    resting_phase: str = "IMPLEMENTATION",
+) -> None:
+    """Drive a task to WAITING_FOR_HUMAN through the real core with the fake executor.
 
+    Phase 3: a clean Implementation now flows straight through Review to Human
+    Review in one turn. The default here instead parks the task at
+    Implementation's own gate stop (the executor never "fixes" the bug),
+    matching the resting state most of these tests exercise: WAITING_FOR_HUMAN
+    with a plain message or resume still starting a fresh turn. A concrete
+    (non-AUTO) Implementation model override means AUTO escalation never
+    applies, so each never-fixing turn -- the setup here and every later
+    message/resume turn -- takes exactly one Implementation attempt, exactly
+    as these tests expect. Pass ``resting_phase="HUMAN_REVIEW"`` for tests that
+    specifically exercise Approve/Reject, where only Human Review is correct.
+    """
+
+    executor = context.sessions.executor_factory()
+    if resting_phase == "IMPLEMENTATION" and isinstance(executor, FakeAgentExecutor):
+        executor.fix_on_attempt = None
+        context.storage.set_phase_model_preference(
+            task_id,
+            WorkflowPhase.IMPLEMENTATION,
+            LogicalModel.CLAUDE_SONNET,
+            "test-setup",
+            "test-setup",
+        )
     context.sessions.start(task_id, HumanIdentity(actor_id="cli-user", display_name="cli-user"))
     assert context.storage.get_task(task_id).status is TaskStatus.WAITING_FOR_HUMAN
 
@@ -435,7 +475,7 @@ def test_queued_message_fails_cleanly_when_task_is_no_longer_continuable(
     tmp_path: Path,
 ) -> None:
     context = _context(tmp_path)
-    _waiting_for_human(context)
+    _waiting_for_human(context, resting_phase="HUMAN_REVIEW")
     submitted = create_app(context).state.conversation.submit(
         "DEMO-1", "late", "key-late-01", _web_human()
     )

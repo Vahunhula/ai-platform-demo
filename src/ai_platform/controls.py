@@ -42,6 +42,7 @@ from ai_platform.sessions import (
     TaskSessionService,
 )
 from ai_platform.storage import SQLiteStorage
+from ai_platform.workflow import WorkflowPhase
 
 
 class ControlAction(StrEnum):
@@ -159,6 +160,8 @@ class TaskControlService:
         if action is ControlAction.APPROVE:
             if status is not TaskStatus.WAITING_FOR_HUMAN:
                 return "Task cannot be approved until it is waiting for human review."
+            if record.workflow_phase is not WorkflowPhase.HUMAN_REVIEW:
+                return "Task cannot be approved until it reaches Human Review."
             if record.verification_status is not VerificationStatus.PASSED:
                 return "Task cannot be approved until verification has passed."
             if writer:

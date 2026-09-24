@@ -113,6 +113,13 @@ export interface TaskDetail extends TaskListItem {
   actions: TaskActions;
   created_at: string;
   default_model_selection: LogicalModel;
+  latest_readiness: ReadinessSummary | null;
+}
+
+export interface ReadinessSummary {
+  phase: "BRAINSTORM" | "PLAN" | "IMPLEMENTATION" | "REVIEW" | "HUMAN_REVIEW";
+  score: number;
+  eligible_for_auto_progression: boolean;
 }
 
 export type LogicalModel = "AUTO" | "CLAUDE_SONNET" | "CLAUDE_OPUS";

@@ -7,6 +7,8 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
+from ai_platform.events import ActorType
+
 
 class WorkflowPhase(StrEnum):
     """Durable workflow position, independent from task lifecycle status."""
@@ -105,6 +107,12 @@ def validate_artifact_payload(kind: ArtifactKind, payload: object) -> dict[str, 
     return validated.model_dump(mode="json")
 
 
+def artifact_json_schema(kind: ArtifactKind) -> dict[str, object]:
+    """Return the JSON Schema contract an agent's structured output must match."""
+
+    return _PAYLOAD_ADAPTERS[kind].json_schema()
+
+
 class WorkflowArtifact(BaseModel):
     artifact_id: str = Field(default_factory=lambda: str(uuid4()))
     task_id: str
@@ -115,6 +123,13 @@ class WorkflowArtifact(BaseModel):
     created_by: str
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     supersedes_artifact_id: str | None = None
+    # Provenance (Phase 3): who/what produced this artifact, never pretending an
+    # agent-authored artifact was written by a human.
+    created_by_type: ActorType = ActorType.HUMAN
+    execution_id: str | None = None
+    logical_model: str | None = None
+    concrete_model: str | None = None
+    provider: str | None = None
 
 
 class ChecklistStatus(StrEnum):
@@ -162,52 +177,119 @@ class ChecklistEvaluation(BaseModel):
 CHECKLISTS: dict[WorkflowPhase, tuple[ChecklistDefinition, ...]] = {
     WorkflowPhase.BRAINSTORM: (
         ChecklistDefinition(
-            key="problem_defined", label="Problem is defined", weight=40, blocking=True
+            key="requirements_understood",
+            label="Requirements are understood",
+            weight=35,
+            blocking=True,
         ),
         ChecklistDefinition(
-            key="assumptions_recorded", label="Assumptions are recorded", weight=25, blocking=False
+            key="repository_context_inspected",
+            label="Repository context is inspected",
+            weight=25,
+            blocking=True,
         ),
         ChecklistDefinition(
-            key="options_considered", label="Options are considered", weight=35, blocking=False
+            key="viable_direction_identified",
+            label="A viable direction is identified",
+            weight=20,
+            blocking=True,
+        ),
+        ChecklistDefinition(
+            key="blocking_questions_resolved",
+            label="Blocking questions are resolved",
+            weight=18,
+            blocking=True,
+        ),
+        ChecklistDefinition(
+            key="assumptions_documented",
+            label="Assumptions are documented",
+            weight=2,
+            blocking=False,
         ),
     ),
     WorkflowPhase.PLAN: (
         ChecklistDefinition(
-            key="scope_complete", label="Plan scope is complete", weight=40, blocking=True
+            key="implementation_steps_complete",
+            label="Implementation steps are complete",
+            weight=30,
+            blocking=True,
         ),
         ChecklistDefinition(
-            key="tests_defined", label="Tests are defined", weight=30, blocking=True
+            key="affected_files_identified",
+            label="Affected files are identified",
+            weight=20,
+            blocking=True,
         ),
         ChecklistDefinition(
-            key="risks_addressed", label="Risks are addressed", weight=30, blocking=False
+            key="validation_plan_defined",
+            label="A validation plan is defined",
+            weight=25,
+            blocking=True,
         ),
+        ChecklistDefinition(
+            key="risks_addressed", label="Risks are addressed", weight=13, blocking=True
+        ),
+        ChecklistDefinition(
+            key="open_questions_resolved",
+            label="Open questions are resolved",
+            weight=10,
+            blocking=True,
+        ),
+        ChecklistDefinition(key="plan_clarity", label="Plan is clear", weight=2, blocking=False),
     ),
     WorkflowPhase.IMPLEMENTATION: (
         ChecklistDefinition(
-            key="requirements_met", label="Requirements are implemented", weight=40, blocking=True
+            key="required_changes_present",
+            label="Required changes are present",
+            weight=30,
+            blocking=True,
         ),
         ChecklistDefinition(
-            key="tests_pass", label="Required tests pass", weight=40, blocking=True
+            key="deterministic_verification_passed",
+            label="Deterministic verification passed",
+            weight=40,
+            blocking=True,
         ),
         ChecklistDefinition(
-            key="known_issues_recorded",
-            label="Known issues are recorded",
-            weight=20,
-            blocking=False,
+            key="implementation_matches_plan",
+            label="Implementation matches the plan",
+            weight=18,
+            blocking=True,
+        ),
+        ChecklistDefinition(
+            key="no_known_blocking_issues",
+            label="No known blocking issues",
+            weight=10,
+            blocking=True,
+        ),
+        ChecklistDefinition(
+            key="cleanup_quality", label="Cleanup quality", weight=2, blocking=False
         ),
     ),
     WorkflowPhase.REVIEW: (
         ChecklistDefinition(
             key="no_critical_findings",
             label="No critical findings remain",
-            weight=50,
+            weight=35,
             blocking=True,
         ),
         ChecklistDefinition(
-            key="requirements_reviewed", label="Requirements are reviewed", weight=30, blocking=True
+            key="no_major_blocking_findings",
+            label="No major blocking findings remain",
+            weight=30,
+            blocking=True,
         ),
         ChecklistDefinition(
-            key="conventions_reviewed", label="Conventions are reviewed", weight=20, blocking=False
+            key="requirements_satisfied",
+            label="Requirements are satisfied",
+            weight=20,
+            blocking=True,
+        ),
+        ChecklistDefinition(
+            key="tests_sufficient", label="Tests are sufficient", weight=13, blocking=True
+        ),
+        ChecklistDefinition(
+            key="no_minor_findings", label="No minor findings remain", weight=2, blocking=False
         ),
     ),
     WorkflowPhase.HUMAN_REVIEW: (

@@ -4,6 +4,10 @@ Demo 2.5 Phase 2 workflow domain behavior is documented in
 [`docs/demo25-phase2-domain.md`](docs/demo25-phase2-domain.md).
 Demo 2.5 Phase 2.1 model selection and routing is documented in
 [`docs/demo25-phase21-model-routing.md`](docs/demo25-phase21-model-routing.md).
+Demo 2.5 Phase 3 connects that domain model into the real LangGraph phase
+workflow (Brainstorm/Plan/Implementation/Review/Human Review, automatic
+readiness-gated progression, a fresh independent Review invocation) and is
+documented in [`docs/demo25-phase3-workflow.md`](docs/demo25-phase3-workflow.md).
 
 AI Platform Demo is a proof of concept for a shared, persistent, task-owned AI
 software-development workflow. Phase 5 deploys the Phase 4 orchestration and
@@ -411,7 +415,12 @@ read-only diagnostics, clean auth failure, identity resolution, actor attributio
 history, append-only deterministic event order, follow cursors, concurrent
 SQLite/CLI writers, one active agent turn, pause behavior, shell exclusion and
 Git change attribution, same-workspace resume, rejection, approval, and source
-repository integrity.
+repository integrity. Phase 3 adds the phase-aware LangGraph pipeline: the
+happy path reaching Human Review in one turn, each read-only phase's gate
+stopping and rerunning with feedback, bounded Implementation failure as a gate
+stop (not FAILED), Review findings at each severity, read-only enforcement
+(an unexpected workspace mutation fails a phase's gate closed), and per-phase
+model routing (`tests/test_phase3_pipeline.py`).
 
 The clean source under `demo_repo/` intentionally contains the three regression
 tasks. Run that red baseline only when desired with `pytest demo_repo/tests`.

@@ -140,6 +140,7 @@ class SQLiteStorage:
             self._migrate_task_columns(connection)
             self._create_repository_table(connection)
             self._create_workflow_tables(connection)
+            self._migrate_workflow_artifact_provenance(connection)
             self._create_model_routing_table(connection)
             connection.execute(
                 """
@@ -303,6 +304,12 @@ class SQLiteStorage:
         kind: ArtifactKind,
         payload: dict[str, object],
         created_by: str,
+        *,
+        created_by_type: ActorType = ActorType.HUMAN,
+        execution_id: str | None = None,
+        logical_model: str | None = None,
+        concrete_model: str | None = None,
+        provider: str | None = None,
     ) -> WorkflowArtifact:
         """Append the next artifact version under a serialized SQLite write lock."""
 
@@ -327,13 +334,19 @@ class SQLiteStorage:
                 payload=payload,
                 created_by=created_by,
                 supersedes_artifact_id=(previous["artifact_id"] if previous else None),
+                created_by_type=created_by_type,
+                execution_id=execution_id,
+                logical_model=logical_model,
+                concrete_model=concrete_model,
+                provider=provider,
             )
             connection.execute(
                 """
                 INSERT INTO workflow_artifacts (
                     artifact_id, task_id, phase, kind, version, payload_json,
-                    created_by, created_at, supersedes_artifact_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    created_by, created_at, supersedes_artifact_id,
+                    created_by_type, execution_id, logical_model, concrete_model, provider
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     artifact.artifact_id,
@@ -345,6 +358,11 @@ class SQLiteStorage:
                     created_by,
                     artifact.created_at.isoformat(),
                     artifact.supersedes_artifact_id,
+                    created_by_type.value,
+                    execution_id,
+                    logical_model,
+                    concrete_model,
+                    provider,
                 ),
             )
         return artifact
@@ -1306,6 +1324,7 @@ class SQLiteStorage:
 
     @staticmethod
     def _artifact_from_row(row: sqlite3.Row) -> WorkflowArtifact:
+        columns = row.keys()
         return WorkflowArtifact(
             artifact_id=row["artifact_id"],
             task_id=row["task_id"],
@@ -1316,6 +1335,14 @@ class SQLiteStorage:
             created_by=row["created_by"],
             created_at=row["created_at"],
             supersedes_artifact_id=row["supersedes_artifact_id"],
+            created_by_type=(
+                row["created_by_type"] if "created_by_type" in columns and row["created_by_type"]
+                else ActorType.HUMAN
+            ),
+            execution_id=row["execution_id"] if "execution_id" in columns else None,
+            logical_model=row["logical_model"] if "logical_model" in columns else None,
+            concrete_model=row["concrete_model"] if "concrete_model" in columns else None,
+            provider=row["provider"] if "provider" in columns else None,
         )
 
     @staticmethod
@@ -1595,6 +1622,32 @@ class SQLiteStorage:
                 BEGIN SELECT RAISE(ABORT, '{table} is append-only'); END
                 """
             )
+
+    @staticmethod
+    def _migrate_workflow_artifact_provenance(connection: sqlite3.Connection) -> None:
+        """Phase 3: additive artifact-provenance columns, backfilled as HUMAN.
+
+        Every artifact created before this migration was created only through the
+        authenticated HTTP API, so backfilling ``created_by_type = 'HUMAN'`` is
+        accurate, idempotent, and never rewrites existing history's meaning.
+        """
+
+        columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(workflow_artifacts)")
+        }
+        migrations = {
+            "created_by_type": (
+                "ALTER TABLE workflow_artifacts ADD COLUMN created_by_type TEXT "
+                "NOT NULL DEFAULT 'HUMAN'"
+            ),
+            "execution_id": "ALTER TABLE workflow_artifacts ADD COLUMN execution_id TEXT",
+            "logical_model": "ALTER TABLE workflow_artifacts ADD COLUMN logical_model TEXT",
+            "concrete_model": "ALTER TABLE workflow_artifacts ADD COLUMN concrete_model TEXT",
+            "provider": "ALTER TABLE workflow_artifacts ADD COLUMN provider TEXT",
+        }
+        for column, statement in migrations.items():
+            if column not in columns:
+                connection.execute(statement)
 
     @staticmethod
     def _create_repository_table(connection: sqlite3.Connection) -> None:

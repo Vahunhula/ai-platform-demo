@@ -23,6 +23,14 @@ export function TaskOverview({ detail }: { detail: TaskDetail }) {
         />
         <Fact label="Active writer" value={detail.writer ?? "None"} />
         <Fact label="Workspace" value={detail.workspace_id ?? "Not created"} />
+        {detail.latest_readiness && (
+          <Fact
+            label="Last gate"
+            value={`${detail.latest_readiness.phase.replaceAll("_", " ")}: ${detail.latest_readiness.score.toFixed(0)} / ${
+              detail.latest_readiness.eligible_for_auto_progression ? "eligible" : "blocked"
+            }`}
+          />
+        )}
       </div>
       <div className="overview-copy">
         <div>

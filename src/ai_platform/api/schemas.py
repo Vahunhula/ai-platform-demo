@@ -153,6 +153,14 @@ class TaskActions(BaseModel):
     reset: ActionState
 
 
+class ReadinessSummary(BaseModel):
+    """The most recent readiness gate evaluated for this task, of any phase."""
+
+    phase: WorkflowPhase
+    score: float
+    eligible_for_auto_progression: bool
+
+
 class TaskDetailResponse(TaskListItem):
     description: str
     acceptance_criteria: list[str]
@@ -168,6 +176,7 @@ class TaskDetailResponse(TaskListItem):
     actions: TaskActions
     created_at: datetime
     default_model_selection: LogicalModel
+    latest_readiness: ReadinessSummary | None = None
 
 
 class ModelCatalogResponse(BaseModel):

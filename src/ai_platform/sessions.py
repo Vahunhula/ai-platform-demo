@@ -18,7 +18,6 @@ from ai_platform.identity import HumanIdentity
 from ai_platform.locks import ExecutionLockManager, LockAcquisition
 from ai_platform.models import (
     ExecutionKind,
-    ModelSelection,
     TaskDefinition,
     TaskRecord,
     TaskStatus,
@@ -27,7 +26,7 @@ from ai_platform.repositories import RepositoryService
 from ai_platform.router import ModelRouter
 from ai_platform.storage import SQLiteStorage
 from ai_platform.task_loader import get_task
-from ai_platform.workflow import WorkflowPhase
+from ai_platform.workflow import TransitionMode, WorkflowPhase
 from ai_platform.workspace import FileChange, LocalWorkspaceProvider
 
 _CONTEXT_EVENT_LIMIT = 12
@@ -90,6 +89,10 @@ class TurnOutcome:
     queued: bool = False
     state: TaskGraphState | None = None
     detail: str = ""
+    # True when no agent turn ran but the outcome is final for this instruction
+    # (e.g. it arrived while the task rests in HUMAN_REVIEW): a queued browser
+    # message should complete, not be endlessly retried like a genuine race.
+    terminal: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,7 +111,6 @@ class PreparedTurn:
     execution_id: str
     executor: AgentExecutor
     continuation: bool
-    selection: ModelSelection
     through_sequence_id: int | None = None
 
 
@@ -251,9 +253,7 @@ class TaskSessionService:
             raise TaskSessionError(
                 f"{task.id} is {record.status.value.upper()}; reset it before a new start."
             )
-        selection = self.router.resolve(
-            task.id, WorkflowPhase.IMPLEMENTATION, storage=self.storage
-        )
+        self._check_starting_phase_available(task.id, record.workflow_phase)
         executor = self._preflight_executor()
         execution_id = execution_id or str(uuid4())
         lock = self.locks.acquire(
@@ -265,7 +265,7 @@ class TaskSessionService:
         )
         if not lock.acquired:
             raise self._lock_error(task.id, lock)
-        return PreparedTurn(task, human, lock.owner_token, execution_id, executor, False, selection)
+        return PreparedTurn(task, human, lock.owner_token, execution_id, executor, False)
 
     def run_prepared(self, prepared: PreparedTurn) -> TurnOutcome:
         """Run a prepared turn to its end; the writer lock is always released."""
@@ -276,7 +276,6 @@ class TaskSessionService:
             prepared.owner,
             prepared.execution_id,
             prepared.executor,
-            prepared.selection,
             continuation=prepared.continuation,
             through_sequence_id=prepared.through_sequence_id,
         )
@@ -328,6 +327,19 @@ class TaskSessionService:
                     "the next turn."
                     if queued
                     else f"Message recorded; {task.id} is {record.status.value.upper()}."
+                ),
+            )
+        if record.workflow_phase is WorkflowPhase.HUMAN_REVIEW:
+            # HUMAN_REVIEW runs no agent automatically: a plain chat message is
+            # recorded (by the caller) but does not start a turn. Approve or
+            # Reject are the only ways forward from here. This is final, not a
+            # race to retry: a queued browser message completes as delivered.
+            return TurnOutcome(
+                agent_started=False,
+                terminal=True,
+                detail=(
+                    f"Message recorded; {task.id} is in Human Review. Use Approve or Reject "
+                    "to continue."
                 ),
             )
         return self._try_continuation(
@@ -498,9 +510,7 @@ class TaskSessionService:
         if record.status is not TaskStatus.PAUSED_BY_HUMAN:
             raise TaskSessionError(f"{task.id} is not PAUSED_BY_HUMAN")
         content = self._validate_message(message) if message is not None else None
-        selection = self.router.resolve(
-            task.id, WorkflowPhase.IMPLEMENTATION, storage=self.storage
-        )
+        self._check_starting_phase_available(task.id, record.workflow_phase)
         executor = self._preflight_executor()
         execution_id = execution_id or str(uuid4())
         lock = self.locks.acquire(
@@ -520,7 +530,7 @@ class TaskSessionService:
                 {"message": content},
             )
         self._append_human_event(task.id, EventType.HUMAN_RESUMED, human)
-        return PreparedTurn(task, human, lock.owner_token, execution_id, executor, True, selection)
+        return PreparedTurn(task, human, lock.owner_token, execution_id, executor, True)
 
     def reject(self, task_id: str, message: str, human: HumanIdentity) -> TurnOutcome:
         """Record review rejection and continue against the same workspace."""
@@ -546,6 +556,18 @@ class TaskSessionService:
         record = self._record(task.id)
         if record.status is not TaskStatus.WAITING_FOR_HUMAN:
             raise TaskSessionError(f"{task.id} must be WAITING_FOR_HUMAN before review rejection")
+        if record.workflow_phase is WorkflowPhase.HUMAN_REVIEW:
+            # The default correction target: a human rejecting the final review
+            # sends the task back to Implementation with their feedback. This is
+            # an explicit human decision, so it is recorded as MANUAL, never as
+            # an automatic gate transition.
+            self._transition_phase_manual(
+                task.id,
+                WorkflowPhase.HUMAN_REVIEW,
+                WorkflowPhase.IMPLEMENTATION,
+                human,
+                reason="Rejected from Human Review",
+            )
         prepared = self._prepare_continuation(
             task, human, {TaskStatus.WAITING_FOR_HUMAN}, execution_id=execution_id
         )
@@ -672,9 +694,7 @@ class TaskSessionService:
         execution_id: str | None = None,
         through_sequence_id: int | None = None,
     ) -> PreparedTurn | TurnOutcome:
-        selection = self.router.resolve(
-            task.id, WorkflowPhase.IMPLEMENTATION, storage=self.storage
-        )
+        self._check_starting_phase_available(task.id, self._record(task.id).workflow_phase)
         executor = self._preflight_executor()
         execution_id = execution_id or str(uuid4())
         lock = self.locks.acquire(
@@ -703,7 +723,6 @@ class TaskSessionService:
             execution_id,
             executor,
             True,
-            selection,
             through_sequence_id,
         )
 
@@ -714,7 +733,6 @@ class TaskSessionService:
         owner: str,
         execution_id: str,
         executor: AgentExecutor,
-        selection: ModelSelection,
         *,
         continuation: bool,
         through_sequence_id: int | None = None,
@@ -742,7 +760,6 @@ class TaskSessionService:
                     recent_agent_messages=agent_messages,
                     human_workspace_changed=human_workspace_changed,
                     workspace_path=workspace,
-                    resolved_selection=selection,
                 )
         except KeyboardInterrupt:
             previous = self._record(task.id).status
@@ -895,6 +912,43 @@ class TaskSessionService:
                 metadata={"from": previous.value, "to": current.value},
             )
         )
+
+    def _check_starting_phase_available(self, task_id: str, phase: WorkflowPhase) -> None:
+        """Fail fast if the phase a turn is about to start in has no usable model.
+
+        HUMAN_REVIEW never runs an agent, so it has nothing to check: a turn
+        starting there (a defensive case the graph itself also handles) simply
+        re-confirms the wait state.
+        """
+
+        if phase is WorkflowPhase.HUMAN_REVIEW:
+            return
+        self.router.resolve(task_id, phase, storage=self.storage)
+
+    def _transition_phase_manual(
+        self,
+        task_id: str,
+        expected_from: WorkflowPhase,
+        target: WorkflowPhase,
+        human: HumanIdentity,
+        *,
+        reason: str,
+    ) -> None:
+        event = Event(
+            task_id=task_id,
+            event_type=EventType.WORKFLOW_PHASE_CHANGED,
+            actor_type=ActorType.HUMAN,
+            actor_id=human.actor_id,
+            metadata={
+                "from_phase": expected_from.value,
+                "to_phase": target.value,
+                "transition_mode": TransitionMode.MANUAL.value,
+                "display_name": human.display_name,
+                "reason": reason,
+            },
+        )
+        if not self.storage.transition_workflow_phase(task_id, expected_from, target, event):
+            raise TaskSessionError(f"{task_id} is no longer in {expected_from.value}")
 
     def _preflight_executor(self) -> AgentExecutor:
         executor = self.executor_factory()
