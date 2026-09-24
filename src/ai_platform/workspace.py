@@ -177,7 +177,16 @@ class LocalWorkspaceProvider(WorkspaceProvider):
 
     def get_diff(self, task_id: str) -> str:
         workspace = self._existing_workspace(task_id)
-        return self._git(workspace, "diff", "--no-ext-diff", "HEAD").stdout
+        tracked = self._git(workspace, "diff", "--no-ext-diff", "HEAD").stdout
+        untracked = self._git(
+            workspace, "ls-files", "--others", "--exclude-standard", "-z"
+        ).stdout.split("\0")
+        additions = [
+            self._git_untracked_diff(workspace, relative_path)
+            for relative_path in untracked
+            if relative_path
+        ]
+        return tracked + "".join(additions)
 
     def get_changed_files(self, task_id: str) -> list[FileChange]:
         return [
@@ -252,6 +261,36 @@ class LocalWorkspaceProvider(WorkspaceProvider):
         self._git(workspace, "config", "user.email", "demo@localhost", executable=git)
         self._git(workspace, "add", ".", executable=git)
         self._git(workspace, "commit", "-m", "Baseline", executable=git)
+
+    @staticmethod
+    def _git_untracked_diff(workspace: Path, relative_path: str) -> str:
+        """Render an untracked file without changing the workspace's Git index."""
+
+        git = shutil.which("git")
+        if not git:
+            raise WorkspaceError("Git is required but was not found")
+        completed = subprocess.run(
+            [
+                git,
+                "-c",
+                f"safe.directory={workspace.resolve()}",
+                "diff",
+                "--no-index",
+                "--",
+                "/dev/null",
+                relative_path,
+            ],
+            cwd=workspace,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            shell=False,
+        )
+        if completed.returncode not in {0, 1}:
+            detail = (completed.stderr or completed.stdout).strip()[:1000]
+            raise WorkspaceError(f"Git diff for untracked file failed: {detail}")
+        return completed.stdout
 
     @staticmethod
     def _prepare_shared_tree(workspace: Path) -> None:
