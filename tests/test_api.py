@@ -79,6 +79,7 @@ async def test_task_listing_and_known_detail(
         "title": "Fix welcome typo",
         "difficulty": "LOW",
         "status": "READY",
+        "workflow_phase": "IMPLEMENTATION",
         "model_tier": None,
         "writer": None,
     }
@@ -268,6 +269,9 @@ def test_mutation_routes_are_exactly_auth_presence_messages_and_controls() -> No
                 "approve",
                 "reject",
                 "reset",
+                "phase",
+                "artifacts",
+                "checklists",
             )
         ),
     }

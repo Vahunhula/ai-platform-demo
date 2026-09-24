@@ -199,6 +199,7 @@ async def test_safe_catalogs_and_developer_create_task(tmp_path: Path) -> None:
     assert response.status_code == 201, response.text
     created = response.json()
     assert created["id"].startswith("TASK-") and created["status"] == "READY"
+    assert created["workflow_phase"] == "BRAINSTORM"
     assert created["created_by"] == "vakho" and created["workspace_ready"] is True
     assert "workspace" not in created or "workspace_path" not in created
     record = context.storage.get_task(created["id"])
@@ -479,4 +480,21 @@ def test_concurrent_initialize_migrates_additively(tmp_path: Path) -> None:
         list(pool.map(lambda storage: storage.initialize(), storages))
     with storages[0].transaction() as connection:
         columns = {row["name"] for row in connection.execute("PRAGMA table_info(tasks)")}
-    assert {"repository_id", "assignee_user_id", "created_by", "description"} <= columns
+        tables = {
+            row["name"]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+    assert {
+        "repository_id",
+        "assignee_user_id",
+        "created_by",
+        "description",
+        "workflow_phase",
+    } <= columns
+    assert {
+        "workflow_artifacts",
+        "checklist_evaluations",
+        "checklist_evaluation_items",
+    } <= tables

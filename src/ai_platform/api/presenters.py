@@ -95,6 +95,9 @@ _COMMON_PUBLIC_METADATA = {
     "base_branch",
     "assignee_user_id",
     "assignee_username",
+    "from_phase",
+    "to_phase",
+    "transition_mode",
 }
 _TEST_EVENTS = {EventType.TEST_STARTED, EventType.TEST_PASSED, EventType.TEST_FAILED}
 # A path component continues with these characters; a placeholder must not cut one in half.
@@ -225,6 +228,7 @@ class Presenter:
             title=definition.title,
             difficulty=definition.difficulty.value.upper(),
             status=record.status.value.upper(),
+            workflow_phase=record.workflow_phase,
             model_tier=(record.selected_tier.value if record.selected_tier else None),
             writer=_writer(record),
             updated_at=record.updated_at,

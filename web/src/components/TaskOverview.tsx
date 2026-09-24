@@ -6,6 +6,7 @@ export function TaskOverview({ detail }: { detail: TaskDetail }) {
   return (
     <section className="overview">
       <div className="facts">
+        <Fact label="Phase" value={detail.workflow_phase.replaceAll("_", " ")} />
         <Fact label="Difficulty" value={detail.difficulty} />
         <Fact
           label="Model"

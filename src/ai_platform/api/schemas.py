@@ -6,6 +6,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ai_platform.sessions import MAX_MESSAGE_LENGTH
+from ai_platform.workflow import ArtifactKind, ChecklistResult, WorkflowPhase
 
 
 class HealthResponse(BaseModel):
@@ -88,6 +89,7 @@ class CreateTaskResponse(BaseModel):
     assignee_user_id: str
     jira_key: str | None
     status: Literal["READY"]
+    workflow_phase: Literal["BRAINSTORM"]
     created_by: str
     created_at: datetime
     workspace_ready: Literal[True] = True
@@ -109,6 +111,7 @@ class TaskListItem(BaseModel):
     title: str
     difficulty: str
     status: str
+    workflow_phase: WorkflowPhase
     model_tier: str | None
     writer: str | None
     updated_at: datetime
@@ -180,6 +183,81 @@ class EventResponse(BaseModel):
 class DiffResponse(BaseModel):
     task_id: str
     diff: str
+
+
+class PhaseTransitionRequest(BaseModel):
+    """Optimistic manual transition; actor and mode are server-owned."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    from_phase: WorkflowPhase
+    to_phase: WorkflowPhase
+    reason: str | None = Field(default=None, max_length=4000)
+
+
+class PhaseTransitionResponse(BaseModel):
+    task_id: str
+    from_phase: WorkflowPhase
+    workflow_phase: WorkflowPhase
+    transition_mode: Literal["MANUAL"] = "MANUAL"
+
+
+class CreateArtifactRequest(BaseModel):
+    """Artifact producer identity is always resolved from the session."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    phase: WorkflowPhase
+    kind: ArtifactKind
+    payload: dict[str, Any]
+
+
+class ArtifactResponse(BaseModel):
+    artifact_id: str
+    task_id: str
+    phase: WorkflowPhase
+    kind: ArtifactKind
+    version: int
+    payload: dict[str, Any]
+    created_by: str
+    created_at: datetime
+    supersedes_artifact_id: str | None
+
+
+class CreateChecklistRequest(BaseModel):
+    """Only results/evidence are submitted; weights and blockers are platform-owned."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    phase: WorkflowPhase
+    items: list[ChecklistResult]
+
+
+class ChecklistItemResponse(BaseModel):
+    key: str
+    label: str
+    weight: int
+    blocking: bool
+    status: str
+    evidence: str
+
+
+class ReadinessResponse(BaseModel):
+    score: float
+    blocking_failures: list[str]
+    blocking_needs_human: list[str]
+    eligible_for_auto_progression: bool
+
+
+class ChecklistEvaluationResponse(BaseModel):
+    evaluation_id: str
+    task_id: str
+    phase: WorkflowPhase
+    evaluation_number: int
+    created_by: str
+    created_at: datetime
+    items: list[ChecklistItemResponse]
+    readiness: ReadinessResponse
 
 
 MessageStatusName = Literal["QUEUED", "RUNNING", "COMPLETED", "FAILED"]

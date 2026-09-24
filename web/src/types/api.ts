@@ -54,6 +54,7 @@ export interface CreateTaskRequest {
 export interface CreateTaskResponse extends CreateTaskRequest {
   id: string;
   status: "READY";
+  workflow_phase: "BRAINSTORM";
   created_by: string;
   created_at: string;
   workspace_ready: true;
@@ -64,6 +65,7 @@ export interface TaskListItem {
   title: string;
   difficulty: string;
   status: string;
+  workflow_phase: "BRAINSTORM" | "PLAN" | "IMPLEMENTATION" | "REVIEW" | "HUMAN_REVIEW";
   model_tier: string | null;
   writer: string | null;
   updated_at: string;

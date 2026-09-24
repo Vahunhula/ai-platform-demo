@@ -10,15 +10,27 @@ from ai_platform.api.dependencies import (
 )
 from ai_platform.api.presenters import queued_count
 from ai_platform.api.schemas import (
+    ArtifactResponse,
+    ChecklistEvaluationResponse,
+    CreateArtifactRequest,
+    CreateChecklistRequest,
     CreateTaskRequest,
     CreateTaskResponse,
     DiffResponse,
     EventResponse,
+    PhaseTransitionRequest,
+    PhaseTransitionResponse,
     TaskDetailResponse,
     TaskListItem,
 )
 from ai_platform.api.security import DeveloperDependency, UserDependency
 from ai_platform.task_creation import CreateTaskCommand
+from ai_platform.workflow import TransitionMode
+from ai_platform.workflow_services import (
+    ChecklistService,
+    WorkflowArtifactService,
+    WorkflowPhaseService,
+)
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
 
@@ -42,6 +54,7 @@ def create_task(
         assignee_user_id=record.assignee_user_id or "",
         jira_key=record.jira_key,
         status="READY",
+        workflow_phase=record.workflow_phase.value,
         created_by=record.created_by or user.username,
         created_at=record.created_at,
     )
@@ -82,3 +95,101 @@ def get_events(
 def get_diff(task_id: str, context: ContextDependency) -> DiffResponse:
     definition = context.sessions.get_definition(task_id)
     return DiffResponse(task_id=definition.id, diff=context.sessions.get_diff(task_id))
+
+
+@router.post("/{task_id}/phase", response_model=PhaseTransitionResponse)
+def transition_phase(
+    task_id: str,
+    body: PhaseTransitionRequest,
+    context: ContextDependency,
+    user: DeveloperDependency,
+) -> PhaseTransitionResponse:
+    task_id = context.sessions.get_definition(task_id).id
+    phase = WorkflowPhaseService(context.storage).transition(
+        task_id,
+        body.from_phase,
+        body.to_phase,
+        user,
+        reason=body.reason,
+        mode=TransitionMode.MANUAL,
+    )
+    return PhaseTransitionResponse(
+        task_id=task_id,
+        from_phase=body.from_phase,
+        workflow_phase=phase,
+    )
+
+
+@router.get("/{task_id}/artifacts", response_model=list[ArtifactResponse])
+def list_artifacts(
+    task_id: str,
+    context: ContextDependency,
+    presenter: PresenterDependency,
+    current: bool = False,
+) -> list[ArtifactResponse]:
+    task_id = context.sessions.get_definition(task_id).id
+    return [
+        ArtifactResponse(
+            **{
+                **artifact.model_dump(),
+                "payload": presenter.redactor.value(artifact.payload),
+            }
+        )
+        for artifact in context.storage.list_workflow_artifacts(task_id, current_only=current)
+    ]
+
+
+@router.post("/{task_id}/artifacts", response_model=ArtifactResponse, status_code=201)
+def create_artifact(
+    task_id: str,
+    body: CreateArtifactRequest,
+    context: ContextDependency,
+    presenter: PresenterDependency,
+    user: DeveloperDependency,
+) -> ArtifactResponse:
+    task_id = context.sessions.get_definition(task_id).id
+    artifact = WorkflowArtifactService(context.storage).create(
+        task_id, body.phase, body.kind, body.payload, user
+    )
+    return ArtifactResponse(
+        **{
+            **artifact.model_dump(),
+            "payload": presenter.redactor.value(artifact.payload),
+        }
+    )
+
+
+@router.get("/{task_id}/checklists", response_model=list[ChecklistEvaluationResponse])
+def list_checklists(
+    task_id: str, context: ContextDependency, presenter: PresenterDependency
+) -> list[ChecklistEvaluationResponse]:
+    task_id = context.sessions.get_definition(task_id).id
+    return [
+        _checklist_response(evaluation.model_dump(), presenter)
+        for evaluation in context.storage.list_checklist_evaluations(task_id)
+    ]
+
+
+@router.post(
+    "/{task_id}/checklists",
+    response_model=ChecklistEvaluationResponse,
+    status_code=201,
+)
+def create_checklist(
+    task_id: str,
+    body: CreateChecklistRequest,
+    context: ContextDependency,
+    presenter: PresenterDependency,
+    user: DeveloperDependency,
+) -> ChecklistEvaluationResponse:
+    task_id = context.sessions.get_definition(task_id).id
+    evaluation = ChecklistService(context.storage).evaluate(task_id, body.phase, body.items, user)
+    return _checklist_response(evaluation.model_dump(), presenter)
+
+
+def _checklist_response(
+    data: dict[str, object], presenter: PresenterDependency
+) -> ChecklistEvaluationResponse:
+    """Redact configured server paths from exposed checklist evidence."""
+
+    return ChecklistEvaluationResponse(**presenter.redactor.value(data))

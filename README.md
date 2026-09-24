@@ -1,5 +1,8 @@
 # AI Platform Demo
 
+Demo 2.5 Phase 2 workflow domain behavior is documented in
+[`docs/demo25-phase2-domain.md`](docs/demo25-phase2-domain.md).
+
 AI Platform Demo is a proof of concept for a shared, persistent, task-owned AI
 software-development workflow. Phase 5 deploys the Phase 4 orchestration and
 recovery design as a hosted multi-user SSH demonstration.

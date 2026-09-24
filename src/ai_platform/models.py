@@ -6,6 +6,8 @@ from pathlib import PurePosixPath
 
 from pydantic import BaseModel, Field, field_validator
 
+from ai_platform.workflow import WorkflowPhase
+
 
 class TaskDifficulty(StrEnum):
     """Difficulty declared by a task definition."""
@@ -116,6 +118,7 @@ class TaskRecord(BaseModel):
     description: str | None = None
     difficulty: TaskDifficulty
     status: TaskStatus
+    workflow_phase: WorkflowPhase = WorkflowPhase.BRAINSTORM
     selected_tier: ModelTier | None = None
     selected_model: str | None = None
     attempt: int = 0

@@ -22,6 +22,14 @@ from ai_platform.models import (
     VerificationConfig,
     VerificationStatus,
 )
+from ai_platform.workflow import (
+    ArtifactKind,
+    ChecklistEvaluation,
+    ChecklistItem,
+    ReadinessDecision,
+    WorkflowArtifact,
+    WorkflowPhase,
+)
 
 _BUSY_TIMEOUT_MILLISECONDS = 5000
 
@@ -105,6 +113,7 @@ class SQLiteStorage:
                     title TEXT NOT NULL,
                     difficulty TEXT NOT NULL,
                     status TEXT NOT NULL,
+                    workflow_phase TEXT NOT NULL DEFAULT 'BRAINSTORM',
                     selected_tier TEXT,
                     selected_model TEXT,
                     attempt INTEGER NOT NULL DEFAULT 0,
@@ -124,9 +133,10 @@ class SQLiteStorage:
                 )
                 """
             )
+            self._create_or_migrate_events(connection)
             self._migrate_task_columns(connection)
             self._create_repository_table(connection)
-            self._create_or_migrate_events(connection)
+            self._create_workflow_tables(connection)
             connection.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_events_task_sequence
@@ -169,10 +179,11 @@ class SQLiteStorage:
             connection.execute(
                 """
                 INSERT INTO tasks (
-                    task_id, title, description, difficulty, status, workspace_path,
+                    task_id, title, description, difficulty, status, workflow_phase,
+                    workspace_path,
                     repository_id, base_branch, assignee_user_id, jira_key, created_by,
                     acceptance_criteria_json, verification_json, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record.task_id,
@@ -180,6 +191,7 @@ class SQLiteStorage:
                     record.description,
                     record.difficulty.value,
                     record.status.value,
+                    record.workflow_phase.value,
                     record.workspace_path,
                     record.repository_id,
                     record.base_branch,
@@ -203,10 +215,18 @@ class SQLiteStorage:
             cursor = connection.execute(
                 """
                 INSERT OR IGNORE INTO tasks (
-                    task_id, title, difficulty, status, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                    task_id, title, difficulty, status, workflow_phase, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (task.id, task.title, task.difficulty.value, TaskStatus.READY.value, now, now),
+                (
+                    task.id,
+                    task.title,
+                    task.difficulty.value,
+                    TaskStatus.READY.value,
+                    WorkflowPhase.IMPLEMENTATION.value,
+                    now,
+                    now,
+                ),
             )
             return cursor.rowcount == 1
 
@@ -214,9 +234,7 @@ class SQLiteStorage:
         """Return runtime state for one task."""
 
         with self._connect() as connection:
-            row = connection.execute(
-                "SELECT * FROM tasks WHERE task_id = ?", (task_id,)
-            ).fetchone()
+            row = connection.execute("SELECT * FROM tasks WHERE task_id = ?", (task_id,)).fetchone()
         return self._record_from_row(row) if row else None
 
     def list_tasks(self) -> list[TaskRecord]:
@@ -236,6 +254,221 @@ class SQLiteStorage:
             )
             if cursor.rowcount != 1:
                 raise KeyError(task_id)
+
+    def transition_workflow_phase(
+        self,
+        task_id: str,
+        expected_from: WorkflowPhase,
+        target: WorkflowPhase,
+        event: Event,
+    ) -> bool:
+        """Compare-and-set a phase and append its audit event in one transaction."""
+
+        if event.task_id != task_id or event.event_type is not EventType.WORKFLOW_PHASE_CHANGED:
+            raise ValueError("Invalid workflow transition event")
+        with self._connect(immediate=True) as connection:
+            exists = connection.execute(
+                "SELECT 1 FROM tasks WHERE task_id = ?", (task_id,)
+            ).fetchone()
+            if exists is None:
+                raise KeyError(task_id)
+            cursor = connection.execute(
+                """
+                UPDATE tasks SET workflow_phase = ?, updated_at = ?
+                WHERE task_id = ? AND workflow_phase = ?
+                """,
+                (
+                    target.value,
+                    event.timestamp.isoformat(),
+                    task_id,
+                    expected_from.value,
+                ),
+            )
+            if cursor.rowcount != 1:
+                return False
+            self._insert_event(connection, event)
+            return True
+
+    def create_workflow_artifact(
+        self,
+        task_id: str,
+        phase: WorkflowPhase,
+        kind: ArtifactKind,
+        payload: dict[str, object],
+        created_by: str,
+    ) -> WorkflowArtifact:
+        """Append the next artifact version under a serialized SQLite write lock."""
+
+        with self._connect(immediate=True) as connection:
+            if (
+                connection.execute("SELECT 1 FROM tasks WHERE task_id = ?", (task_id,)).fetchone()
+                is None
+            ):
+                raise KeyError(task_id)
+            previous = connection.execute(
+                """
+                SELECT artifact_id, version FROM workflow_artifacts
+                WHERE task_id = ? AND kind = ? ORDER BY version DESC LIMIT 1
+                """,
+                (task_id, kind.value),
+            ).fetchone()
+            artifact = WorkflowArtifact(
+                task_id=task_id,
+                phase=phase,
+                kind=kind,
+                version=(int(previous["version"]) + 1 if previous else 1),
+                payload=payload,
+                created_by=created_by,
+                supersedes_artifact_id=(previous["artifact_id"] if previous else None),
+            )
+            connection.execute(
+                """
+                INSERT INTO workflow_artifacts (
+                    artifact_id, task_id, phase, kind, version, payload_json,
+                    created_by, created_at, supersedes_artifact_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    artifact.artifact_id,
+                    task_id,
+                    phase.value,
+                    kind.value,
+                    artifact.version,
+                    json.dumps(payload, sort_keys=True),
+                    created_by,
+                    artifact.created_at.isoformat(),
+                    artifact.supersedes_artifact_id,
+                ),
+            )
+        return artifact
+
+    def list_workflow_artifacts(
+        self, task_id: str, *, current_only: bool = False
+    ) -> list[WorkflowArtifact]:
+        """Return artifact history, or the greatest version of each kind."""
+
+        with self._connect() as connection:
+            if (
+                connection.execute("SELECT 1 FROM tasks WHERE task_id = ?", (task_id,)).fetchone()
+                is None
+            ):
+                raise KeyError(task_id)
+            current = (
+                "AND a.version = (SELECT MAX(b.version) FROM workflow_artifacts b "
+                "WHERE b.task_id = a.task_id AND b.kind = a.kind)"
+                if current_only
+                else ""
+            )
+            rows = connection.execute(
+                f"""
+                SELECT a.* FROM workflow_artifacts a
+                WHERE a.task_id = ? {current}
+                ORDER BY a.kind, a.version
+                """,
+                (task_id,),
+            ).fetchall()
+        return [self._artifact_from_row(row) for row in rows]
+
+    def create_checklist_evaluation(
+        self,
+        task_id: str,
+        phase: WorkflowPhase,
+        items: list[ChecklistItem],
+        readiness: ReadinessDecision,
+        created_by: str,
+    ) -> ChecklistEvaluation:
+        """Append an immutable readiness snapshot and all exposed evidence."""
+
+        with self._connect(immediate=True) as connection:
+            if (
+                connection.execute("SELECT 1 FROM tasks WHERE task_id = ?", (task_id,)).fetchone()
+                is None
+            ):
+                raise KeyError(task_id)
+            row = connection.execute(
+                """
+                SELECT COALESCE(MAX(evaluation_number), 0) AS latest
+                FROM checklist_evaluations WHERE task_id = ? AND phase = ?
+                """,
+                (task_id, phase.value),
+            ).fetchone()
+            evaluation = ChecklistEvaluation(
+                task_id=task_id,
+                phase=phase,
+                evaluation_number=int(row["latest"]) + 1,
+                created_by=created_by,
+                items=items,
+                readiness=readiness,
+            )
+            connection.execute(
+                """
+                INSERT INTO checklist_evaluations (
+                    evaluation_id, task_id, phase, evaluation_number, created_by,
+                    created_at, score, blocking_failures_json,
+                    blocking_needs_human_json, eligible_for_auto_progression
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    evaluation.evaluation_id,
+                    task_id,
+                    phase.value,
+                    evaluation.evaluation_number,
+                    created_by,
+                    evaluation.created_at.isoformat(),
+                    readiness.score,
+                    json.dumps(readiness.blocking_failures),
+                    json.dumps(readiness.blocking_needs_human),
+                    int(readiness.eligible_for_auto_progression),
+                ),
+            )
+            for position, item in enumerate(items):
+                connection.execute(
+                    """
+                    INSERT INTO checklist_evaluation_items (
+                        evaluation_id, position, key, label, weight, blocking,
+                        status, evidence
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        evaluation.evaluation_id,
+                        position,
+                        item.key,
+                        item.label,
+                        item.weight,
+                        int(item.blocking),
+                        item.status.value,
+                        item.evidence,
+                    ),
+                )
+        return evaluation
+
+    def list_checklist_evaluations(self, task_id: str) -> list[ChecklistEvaluation]:
+        """Return every immutable checklist snapshot with its item evidence."""
+
+        with self._connect() as connection:
+            if (
+                connection.execute("SELECT 1 FROM tasks WHERE task_id = ?", (task_id,)).fetchone()
+                is None
+            ):
+                raise KeyError(task_id)
+            rows = connection.execute(
+                """
+                SELECT * FROM checklist_evaluations
+                WHERE task_id = ? ORDER BY created_at, evaluation_id
+                """,
+                (task_id,),
+            ).fetchall()
+            evaluations = []
+            for row in rows:
+                item_rows = connection.execute(
+                    """
+                    SELECT * FROM checklist_evaluation_items
+                    WHERE evaluation_id = ? ORDER BY position
+                    """,
+                    (row["evaluation_id"],),
+                ).fetchall()
+                evaluations.append(self._checklist_from_rows(row, item_rows))
+        return evaluations
 
     def update_model_selection(self, task_id: str, selection: ModelSelection) -> None:
         """Record the latest selected tier and provider model on the task."""
@@ -308,9 +541,7 @@ class SQLiteStorage:
                 ),
             )
 
-    def reset_managed_task_runtime(
-        self, task_id: str, workspace_path: Path, owner: str
-    ) -> None:
+    def reset_managed_task_runtime(self, task_id: str, workspace_path: Path, owner: str) -> None:
         """Reset a registered task while retaining its freshly provisioned workspace."""
 
         with self._connect(immediate=True) as connection:
@@ -876,6 +1107,7 @@ class SQLiteStorage:
             description=row["description"],
             difficulty=row["difficulty"],
             status=row["status"],
+            workflow_phase=row["workflow_phase"],
             selected_tier=row["selected_tier"],
             selected_model=row["selected_model"],
             attempt=row["attempt"],
@@ -923,6 +1155,48 @@ class SQLiteStorage:
             error=row["error"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],
+        )
+
+    @staticmethod
+    def _artifact_from_row(row: sqlite3.Row) -> WorkflowArtifact:
+        return WorkflowArtifact(
+            artifact_id=row["artifact_id"],
+            task_id=row["task_id"],
+            phase=row["phase"],
+            kind=row["kind"],
+            version=row["version"],
+            payload=json.loads(row["payload_json"]),
+            created_by=row["created_by"],
+            created_at=row["created_at"],
+            supersedes_artifact_id=row["supersedes_artifact_id"],
+        )
+
+    @staticmethod
+    def _checklist_from_rows(row: sqlite3.Row, item_rows: list[sqlite3.Row]) -> ChecklistEvaluation:
+        return ChecklistEvaluation(
+            evaluation_id=row["evaluation_id"],
+            task_id=row["task_id"],
+            phase=row["phase"],
+            evaluation_number=row["evaluation_number"],
+            created_by=row["created_by"],
+            created_at=row["created_at"],
+            items=[
+                ChecklistItem(
+                    key=item["key"],
+                    label=item["label"],
+                    weight=item["weight"],
+                    blocking=bool(item["blocking"]),
+                    status=item["status"],
+                    evidence=item["evidence"],
+                )
+                for item in item_rows
+            ],
+            readiness=ReadinessDecision(
+                score=row["score"],
+                blocking_failures=json.loads(row["blocking_failures_json"]),
+                blocking_needs_human=json.loads(row["blocking_needs_human_json"]),
+                eligible_for_auto_progression=bool(row["eligible_for_auto_progression"]),
+            ),
         )
 
     @staticmethod
@@ -987,9 +1261,7 @@ class SQLiteStorage:
             "execution_pid": "ALTER TABLE tasks ADD COLUMN execution_pid INTEGER",
             "execution_hostname": "ALTER TABLE tasks ADD COLUMN execution_hostname TEXT",
             "execution_started_at": "ALTER TABLE tasks ADD COLUMN execution_started_at TEXT",
-            "execution_heartbeat_at": (
-                "ALTER TABLE tasks ADD COLUMN execution_heartbeat_at TEXT"
-            ),
+            "execution_heartbeat_at": ("ALTER TABLE tasks ADD COLUMN execution_heartbeat_at TEXT"),
             "pause_requested": (
                 "ALTER TABLE tasks ADD COLUMN pause_requested INTEGER NOT NULL DEFAULT 0"
             ),
@@ -1002,10 +1274,139 @@ class SQLiteStorage:
                 "ALTER TABLE tasks ADD COLUMN acceptance_criteria_json TEXT"
             ),
             "verification_json": "ALTER TABLE tasks ADD COLUMN verification_json TEXT",
+            "workflow_phase": "ALTER TABLE tasks ADD COLUMN workflow_phase TEXT",
         }
         for column, statement in migrations.items():
             if column not in columns:
                 connection.execute(statement)
+        if "workflow_phase" not in columns:
+            meaningful_events = (
+                "'TASK_STARTED', 'AGENT_STARTED', 'AGENT_COMPLETED', 'AGENT_FAILED', "
+                "'TEST_STARTED', 'TEST_PASSED', 'TEST_FAILED'"
+            )
+            connection.execute(
+                f"""
+                UPDATE tasks
+                SET workflow_phase = CASE
+                    WHEN repository_id IS NULL THEN ?
+                    WHEN status <> ? OR attempt > 0 OR selected_model IS NOT NULL
+                         OR EXISTS (
+                             SELECT 1 FROM events
+                             WHERE events.task_id = tasks.task_id
+                               AND events.event_type IN ({meaningful_events})
+                         ) THEN ?
+                    ELSE ?
+                END
+                WHERE workflow_phase IS NULL
+                """,
+                (
+                    WorkflowPhase.IMPLEMENTATION.value,
+                    TaskStatus.READY.value,
+                    WorkflowPhase.IMPLEMENTATION.value,
+                    WorkflowPhase.BRAINSTORM.value,
+                ),
+            )
+        allowed = ", ".join(f"'{phase.value}'" for phase in WorkflowPhase)
+        connection.execute(
+            f"""
+            CREATE TRIGGER IF NOT EXISTS tasks_workflow_phase_valid_insert
+            BEFORE INSERT ON tasks
+            WHEN NEW.workflow_phase IS NULL OR NEW.workflow_phase NOT IN ({allowed})
+            BEGIN SELECT RAISE(ABORT, 'invalid workflow phase'); END
+            """
+        )
+        connection.execute(
+            f"""
+            CREATE TRIGGER IF NOT EXISTS tasks_workflow_phase_valid_update
+            BEFORE UPDATE OF workflow_phase ON tasks
+            WHEN NEW.workflow_phase IS NULL OR NEW.workflow_phase NOT IN ({allowed})
+            BEGIN SELECT RAISE(ABORT, 'invalid workflow phase'); END
+            """
+        )
+
+    @staticmethod
+    def _create_workflow_tables(connection: sqlite3.Connection) -> None:
+        phases = ", ".join(f"'{phase.value}'" for phase in WorkflowPhase)
+        kinds = ", ".join(f"'{kind.value}'" for kind in ArtifactKind)
+        connection.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS workflow_artifacts (
+                artifact_id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL REFERENCES tasks(task_id),
+                phase TEXT NOT NULL CHECK (phase IN ({phases})),
+                kind TEXT NOT NULL CHECK (kind IN ({kinds})),
+                version INTEGER NOT NULL CHECK (version >= 1),
+                payload_json TEXT NOT NULL,
+                created_by TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                supersedes_artifact_id TEXT REFERENCES workflow_artifacts(artifact_id),
+                CHECK (
+                    (kind = 'BRAINSTORM_SUMMARY' AND phase = 'BRAINSTORM') OR
+                    (kind = 'PLAN' AND phase = 'PLAN') OR
+                    (kind = 'IMPLEMENTATION_SUMMARY' AND phase = 'IMPLEMENTATION') OR
+                    (kind = 'REVIEW_REPORT' AND phase = 'REVIEW') OR
+                    (kind = 'HUMAN_REVIEW_DECISION' AND phase = 'HUMAN_REVIEW')
+                ),
+                UNIQUE (task_id, kind, version)
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_workflow_artifacts_task_kind
+            ON workflow_artifacts(task_id, kind, version)
+            """
+        )
+        connection.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS checklist_evaluations (
+                evaluation_id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL REFERENCES tasks(task_id),
+                phase TEXT NOT NULL CHECK (phase IN ({phases})),
+                evaluation_number INTEGER NOT NULL CHECK (evaluation_number >= 1),
+                created_by TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                score REAL NOT NULL CHECK (score >= 0 AND score <= 100),
+                blocking_failures_json TEXT NOT NULL,
+                blocking_needs_human_json TEXT NOT NULL,
+                eligible_for_auto_progression INTEGER NOT NULL CHECK (
+                    eligible_for_auto_progression IN (0, 1)
+                ),
+                UNIQUE (task_id, phase, evaluation_number)
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS checklist_evaluation_items (
+                evaluation_id TEXT NOT NULL REFERENCES checklist_evaluations(evaluation_id),
+                position INTEGER NOT NULL CHECK (position >= 0),
+                key TEXT NOT NULL,
+                label TEXT NOT NULL,
+                weight INTEGER NOT NULL CHECK (weight >= 0),
+                blocking INTEGER NOT NULL CHECK (blocking IN (0, 1)),
+                status TEXT NOT NULL CHECK (status IN ('PASS', 'FAIL', 'NEEDS_HUMAN')),
+                evidence TEXT NOT NULL,
+                PRIMARY KEY (evaluation_id, position),
+                UNIQUE (evaluation_id, key)
+            )
+            """
+        )
+        for table in ("workflow_artifacts", "checklist_evaluations", "checklist_evaluation_items"):
+            connection.execute(
+                f"""
+                CREATE TRIGGER IF NOT EXISTS {table}_append_only_update
+                BEFORE UPDATE ON {table}
+                BEGIN SELECT RAISE(ABORT, '{table} is append-only'); END
+                """
+            )
+            connection.execute(
+                f"""
+                CREATE TRIGGER IF NOT EXISTS {table}_append_only_delete
+                BEFORE DELETE ON {table}
+                BEGIN SELECT RAISE(ABORT, '{table} is append-only'); END
+                """
+            )
 
     @staticmethod
     def _create_repository_table(connection: sqlite3.Connection) -> None:

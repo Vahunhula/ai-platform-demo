@@ -17,6 +17,7 @@ from ai_platform.models import (
 )
 from ai_platform.repositories import RepositoryError, RepositoryService
 from ai_platform.storage import SQLiteStorage
+from ai_platform.workflow import WorkflowPhase
 from ai_platform.workspace import LocalWorkspaceProvider, WorkspaceError, WorkspaceExistsError
 
 logger = logging.getLogger(__name__)
@@ -87,6 +88,7 @@ class TaskCreationService:
             description=command.description,
             difficulty=TaskDifficulty.MEDIUM,
             status=TaskStatus.READY,
+            workflow_phase=WorkflowPhase.BRAINSTORM,
             workspace_path=str(workspace),
             repository_id=repository.id,
             base_branch=command.base_branch,

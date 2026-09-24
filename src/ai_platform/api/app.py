@@ -42,6 +42,7 @@ from ai_platform.task_creation import (
     TaskCreationService,
     TaskProvisioningError,
 )
+from ai_platform.workflow_services import WorkflowConflictError, WorkflowError
 
 logger = logging.getLogger(__name__)
 
@@ -149,6 +150,14 @@ def create_app(
     @application.exception_handler(ActionConflictError)
     async def action_conflict(_request: Request, exc: ActionConflictError) -> JSONResponse:
         return error(409, str(exc))
+
+    @application.exception_handler(WorkflowConflictError)
+    async def workflow_conflict(_request: Request, exc: WorkflowConflictError) -> JSONResponse:
+        return error(409, str(exc))
+
+    @application.exception_handler(WorkflowError)
+    async def workflow_error(_request: Request, exc: WorkflowError) -> JSONResponse:
+        return error(400, str(exc))
 
     @application.exception_handler(RunnerUnavailableError)
     async def runner_unavailable(_request: Request, exc: RunnerUnavailableError) -> JSONResponse:
