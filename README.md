@@ -4,6 +4,8 @@ Demo 2.5 Phase 2 workflow domain behavior is documented in
 [`docs/demo25-phase2-domain.md`](docs/demo25-phase2-domain.md).
 Demo 2.5 Phase 2.1 model selection and routing is documented in
 [`docs/demo25-phase21-model-routing.md`](docs/demo25-phase21-model-routing.md).
+Demo 2.5 Phase 2.2 baseline-aware verification is documented in
+[`docs/demo25-phase22-verification.md`](docs/demo25-phase22-verification.md).
 
 AI Platform Demo is a proof of concept for a shared, persistent, task-owned AI
 software-development workflow. Phase 5 deploys the Phase 4 orchestration and

@@ -61,6 +61,9 @@ class TaskCreationService:
         try:
             assignee = self.auth.assignable_user(command.assignee_user_id)
             self.repositories.validate_branch(Path(repository.source), command.base_branch)
+            source_commit = self.repositories.resolve_commit(
+                Path(repository.source), command.base_branch
+            )
         except (RepositoryError, UserManagementError) as error:
             raise TaskCreationError(str(error)) from error
 
@@ -69,7 +72,7 @@ class TaskCreationService:
             task_id = self._new_task_id()
             try:
                 workspace = self.workspaces.create(
-                    task_id, Path(repository.source), command.base_branch
+                    task_id, Path(repository.source), source_commit
                 )
                 break
             except WorkspaceExistsError:
@@ -111,7 +114,11 @@ class TaskCreationService:
                 event_type=EventType.WORKSPACE_PROVISION_STARTED,
                 actor_type=ActorType.SYSTEM,
                 actor_id="task-creation-service",
-                metadata={"repository_id": repository.id, "base_branch": command.base_branch},
+                metadata={
+                    "repository_id": repository.id,
+                    "base_branch": command.base_branch,
+                    "source_commit": source_commit,
+                },
             ),
             Event(
                 task_id=task_id,
@@ -148,7 +155,11 @@ class TaskCreationService:
                 event_type=EventType.WORKSPACE_PROVISIONED,
                 actor_type=ActorType.SYSTEM,
                 actor_id="local-workspace",
-                metadata={"repository_id": repository.id, "base_branch": command.base_branch},
+                metadata={
+                    "repository_id": repository.id,
+                    "base_branch": command.base_branch,
+                    "source_commit": source_commit,
+                },
             ),
         ]
         try:

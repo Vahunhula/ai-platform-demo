@@ -25,7 +25,12 @@ from ai_platform.models import (
 )
 from ai_platform.router import ModelRouter
 from ai_platform.storage import SQLiteStorage, ensure_group_writable_sqlite_files
-from ai_platform.verification import build_verification_command, verify_task
+from ai_platform.verification import (
+    BaselineContext,
+    build_verification_command,
+    verify_registered_task,
+    verify_task,
+)
 from ai_platform.workflow import WorkflowPhase
 from ai_platform.workspace import WorkspaceProvider
 
@@ -85,6 +90,7 @@ def run_task_graph(
     human_workspace_changed: bool = False,
     workspace_path: Path | None = None,
     resolved_selection: ModelSelection | None = None,
+    baseline_context: BaselineContext | None = None,
 ) -> TaskGraphState:
     """Run one bounded initial or continuation turn for a durable TaskSession."""
 
@@ -119,6 +125,7 @@ def run_task_graph(
             current_execution_id,
             resolved_workspace,
             turn_selection,
+            baseline_context,
         )
         initial_state: TaskGraphState = {
             "task_id": task.id,
@@ -164,6 +171,7 @@ def _build_graph(
     execution_id: str,
     resolved_workspace: Path,
     turn_selection: ModelSelection,
+    baseline_context: BaselineContext | None,
 ):
     def load_task(_state: TaskGraphState) -> TaskGraphState:
         if continuation:
@@ -460,7 +468,55 @@ def _build_graph(
             )
         )
         try:
-            result = verify_task(task, Path(state["workspace_path"]), verification_timeout_seconds)
+            if baseline_context is None:
+                result = verify_task(
+                    task, Path(state["workspace_path"]), verification_timeout_seconds
+                )
+                verification_metadata = {
+                    "verification_mode": "LEGACY_EXPLICIT",
+                    "task_specific_passed": result.passed,
+                    "task_specific_passed_tests": None,
+                    "pre_existing_failures": [],
+                    "fixed_failures": [],
+                    "new_failures": [],
+                    "baseline_warning_count": 0,
+                    "new_regression_count": 0,
+                }
+                failure_output = "\n".join(
+                    part for part in (result.stdout, result.stderr) if part
+                )
+            else:
+                changed_paths = [
+                    change.path for change in workspace_provider.get_changed_files(task.id)
+                ]
+                combined = verify_registered_task(
+                    task,
+                    Path(state["workspace_path"]),
+                    verification_timeout_seconds,
+                    baseline_context,
+                    changed_paths,
+                )
+                result = combined.current_run
+                result.passed = combined.passed
+                verification_metadata = {
+                    "verification_mode": "BASELINE_AWARE",
+                    "task_specific_targets": combined.task_specific.targets,
+                    "task_specific_passed": combined.task_specific.passed,
+                    "task_specific_passed_tests": combined.task_specific.passed_tests,
+                    "pre_existing_failures": combined.broad_regression.pre_existing_failures,
+                    "fixed_failures": combined.broad_regression.fixed_failures,
+                    "new_failures": combined.broad_regression.new_failures,
+                    "baseline_warning_count": len(
+                        combined.broad_regression.pre_existing_failures
+                    ),
+                    "new_regression_count": len(combined.broad_regression.new_failures),
+                    "broad_regression_passed": combined.broad_regression.passed,
+                    "baseline_cached": combined.broad_regression.baseline_cached,
+                    "baseline_identity": combined.broad_regression.baseline_identity,
+                    "blocking_failures": combined.blocking_failures,
+                    "warnings": combined.warnings,
+                }
+                failure_output = combined.correction_context()
             status = VerificationStatus.PASSED if result.passed else VerificationStatus.FAILED
             storage.update_verification_status(task.id, status)
             storage.append_event(
@@ -480,10 +536,10 @@ def _build_graph(
                         "timed_out": result.timed_out,
                         "stdout": result.stdout[-_MAX_EVENT_OUTPUT:],
                         "stderr": result.stderr[-_MAX_EVENT_OUTPUT:],
+                        **verification_metadata,
                     },
                 )
             )
-            failure_output = "\n".join(part for part in (result.stdout, result.stderr) if part)
             return {
                 "verification_passed": result.passed,
                 "verification_output": failure_output[-_MAX_EVENT_OUTPUT:],

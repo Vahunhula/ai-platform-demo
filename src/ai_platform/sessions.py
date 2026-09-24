@@ -27,6 +27,7 @@ from ai_platform.repositories import RepositoryService
 from ai_platform.router import ModelRouter
 from ai_platform.storage import SQLiteStorage
 from ai_platform.task_loader import get_task
+from ai_platform.verification import BaselineContext
 from ai_platform.workflow import WorkflowPhase
 from ai_platform.workspace import FileChange, LocalWorkspaceProvider
 
@@ -598,8 +599,11 @@ class TaskSessionService:
                 if self.repositories is None:
                     raise TaskSessionError("Repository registry is unavailable")
                 repository = self.repositories.get(record.repository_id)
+                source_commit = self.repositories.resolve_commit(
+                    Path(repository.source), record.base_branch
+                )
                 workspace = self.workspaces.create(
-                    task.id, Path(repository.source), record.base_branch
+                    task.id, Path(repository.source), source_commit
                 )
                 self.storage.reset_managed_task_runtime(task.id, workspace, lock.owner_token)
             else:
@@ -619,7 +623,10 @@ class TaskSessionService:
             task.id,
             EventType.TASK_RESET,
             human,
-            {"previous_status": record.status.value},
+            {
+                "previous_status": record.status.value,
+                **({"source_commit": source_commit} if record.repository_id else {}),
+            },
         )
         return workspace
 
@@ -725,6 +732,7 @@ class TaskSessionService:
         human_workspace_changed = self._human_changed_workspace_since_last_agent(task.id)
         try:
             workspace = self.resolve_workspace(task.id, require_exists=continuation)
+            baseline_context = self._baseline_context(task.id)
             with self.locks.heartbeat(task.id, owner):
                 return run_task_graph(
                     task,
@@ -743,6 +751,7 @@ class TaskSessionService:
                     human_workspace_changed=human_workspace_changed,
                     workspace_path=workspace,
                     resolved_selection=selection,
+                    baseline_context=baseline_context,
                 )
         except KeyboardInterrupt:
             previous = self._record(task.id).status
@@ -750,6 +759,7 @@ class TaskSessionService:
             if previous is not TaskStatus.PAUSED_BY_HUMAN:
                 self._append_status_change(task.id, previous, TaskStatus.PAUSED_BY_HUMAN)
             raise
+
         except Exception as error:
             if not self.storage.is_pause_requested(task.id):
                 previous = self._record(task.id).status
@@ -773,6 +783,30 @@ class TaskSessionService:
             pause_transition = self.storage.release_execution(task.id, owner)
             if pause_transition:
                 self._append_status_change(task.id, *pause_transition)
+
+    def _baseline_context(self, task_id: str) -> BaselineContext | None:
+        """Resolve registered dynamic tasks to a clean immutable source commit."""
+
+        record = self._record(task_id)
+        if not record.repository_id or not record.base_branch or self.repositories is None:
+            return None
+        repository = self.repositories.get(record.repository_id)
+        source = Path(repository.source)
+        source_commit = next(
+            (
+                str(event.metadata["source_commit"])
+                for event in reversed(self.storage.get_events(task_id))
+                if isinstance(event.metadata.get("source_commit"), str)
+                and len(str(event.metadata["source_commit"])) == 40
+            ),
+            None,
+        )
+        return BaselineContext(
+            repository_id=repository.id,
+            source_repository=source,
+            source_commit=source_commit
+            or self.repositories.resolve_commit(source, record.base_branch),
+        )
 
     def _current_conversation_context(
         self,

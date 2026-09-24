@@ -81,6 +81,22 @@ export function TestsTab({ events }: { events: PlatformEvent[] }) {
                     <dd>yes</dd>
                   </>
                 )}
+                {m.verification_mode === "BASELINE_AWARE" && (
+                  <>
+                    <dt>Task tests</dt>
+                    <dd>
+                      {m.task_specific_passed === true ? "PASS" : "FAIL"}
+                      {typeof m.task_specific_passed_tests === "number" &&
+                        ` · ${m.task_specific_passed_tests} passed`}
+                    </dd>
+                    <dt>Broad regression</dt>
+                    <dd>{m.broad_regression_passed === true ? "PASS" : "FAIL"}</dd>
+                    <dt>New regressions</dt>
+                    <dd>{String(m.new_regression_count ?? 0)}</dd>
+                    <dt>Baseline warnings</dt>
+                    <dd>{String(m.baseline_warning_count ?? 0)}</dd>
+                  </>
+                )}
               </dl>
               {output && (
                 <details>

@@ -143,6 +143,15 @@ class RepositoryService:
             raise RepositoryError("Base branch is not a safe branch name")
         self._git(source, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}")
 
+    def resolve_commit(self, source: Path, branch: str) -> str:
+        """Resolve a validated local branch to an immutable baseline identity."""
+
+        self.validate_branch(source, branch)
+        commit = self._git(source, "rev-parse", f"refs/heads/{branch}").stdout.strip()
+        if not re.fullmatch(r"[0-9a-f]{40}", commit):
+            raise RepositoryError("Repository branch did not resolve to a commit")
+        return commit
+
     @staticmethod
     def _git(source: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
         git = shutil.which("git")

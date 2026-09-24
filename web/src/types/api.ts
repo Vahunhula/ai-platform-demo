@@ -81,6 +81,16 @@ export interface VerificationResult {
   stdout: string | null;
   stderr: string | null;
   error: string | null;
+  verification_mode: string | null;
+  task_specific_targets: string[];
+  task_specific_passed: boolean | null;
+  task_specific_passed_tests: number | null;
+  broad_regression_passed: boolean | null;
+  baseline_warning_count: number;
+  new_regression_count: number;
+  pre_existing_failures: string[];
+  fixed_failures: string[];
+  new_failures: string[];
 }
 
 export interface MessagingState {

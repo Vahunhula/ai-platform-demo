@@ -128,6 +128,16 @@ class VerificationResultResponse(BaseModel):
     stdout: str | None = None
     stderr: str | None = None
     error: str | None = None
+    verification_mode: str | None = None
+    task_specific_targets: list[str] = Field(default_factory=list)
+    task_specific_passed: bool | None = None
+    task_specific_passed_tests: int | None = None
+    broad_regression_passed: bool | None = None
+    baseline_warning_count: int = 0
+    new_regression_count: int = 0
+    pre_existing_failures: list[str] = Field(default_factory=list)
+    fixed_failures: list[str] = Field(default_factory=list)
+    new_failures: list[str] = Field(default_factory=list)
 
 
 class MessagingState(BaseModel):
