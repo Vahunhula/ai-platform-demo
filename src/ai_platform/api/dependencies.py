@@ -6,9 +6,11 @@ from fastapi import Depends, Request
 
 from ai_platform.api.presenters import Presenter
 from ai_platform.application import ApplicationContext
+from ai_platform.claude_commands import ClaudeCommandService
 from ai_platform.commands import CommandService
 from ai_platform.controls import TaskControlService
 from ai_platform.conversation import ConversationService
+from ai_platform.removal import TaskRemovalService
 from ai_platform.runner import TaskTurnRunner
 from ai_platform.task_creation import TaskCreationService
 
@@ -31,6 +33,10 @@ def get_commands(request: Request) -> CommandService:
     return request.app.state.commands
 
 
+def get_claude_commands(request: Request) -> ClaudeCommandService:
+    return request.app.state.claude_commands
+
+
 def get_presenter(request: Request) -> Presenter:
     return request.app.state.presenter
 
@@ -43,10 +49,16 @@ def get_task_creation(request: Request) -> TaskCreationService:
     return request.app.state.task_creation
 
 
+def get_removal(request: Request) -> TaskRemovalService:
+    return request.app.state.removal
+
+
 ContextDependency = Annotated[ApplicationContext, Depends(get_context)]
 ConversationDependency = Annotated[ConversationService, Depends(get_conversation)]
 PresenterDependency = Annotated[Presenter, Depends(get_presenter)]
 ControlsDependency = Annotated[TaskControlService, Depends(get_controls)]
 CommandsDependency = Annotated[CommandService, Depends(get_commands)]
+ClaudeCommandsDependency = Annotated[ClaudeCommandService, Depends(get_claude_commands)]
 RunnerDependency = Annotated[TaskTurnRunner | None, Depends(get_runner)]
 TaskCreationDependency = Annotated[TaskCreationService, Depends(get_task_creation)]
+RemovalDependency = Annotated[TaskRemovalService, Depends(get_removal)]

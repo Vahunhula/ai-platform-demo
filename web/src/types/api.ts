@@ -88,7 +88,7 @@ export interface MessagingState {
   reason: string | null;
 }
 
-export type ControlAction = "start" | "pause" | "resume" | "approve" | "reject" | "reset";
+export type ControlAction = "start" | "pause" | "resume" | "approve" | "defer" | "reject" | "reset";
 
 /** Decided by the backend; the UI only renders it. */
 export interface ActionState {
@@ -114,6 +114,9 @@ export interface TaskDetail extends TaskListItem {
   created_at: string;
   default_model_selection: LogicalModel;
   latest_readiness: ReadinessSummary | null;
+  disposition: "CONFIRMED" | "DEFERRED" | null;
+  can_remove: boolean;
+  remove_disabled_reason: string | null;
 }
 
 export interface ReadinessSummary {
@@ -221,6 +224,18 @@ export interface CommandResult {
   data: Record<string, unknown>;
 }
 
+export interface ClaudeCommandMetadata {
+  namespace: "claude";
+  command: string;
+  description: string;
+  usage: string;
+  classification: "NATIVE" | "ADAPTED" | "DISABLED" | "FUTURE_INFRA_ONLY";
+  required_permission: "viewer" | "developer";
+  executor_capability: string;
+  available: boolean;
+  disabled_reason: string | null;
+}
+
 /** Bodies accepted by the control endpoints; never an actor, command or path. */
 export type ControlRequest =
   | { action: "start"; client_action_id: string }
@@ -228,6 +243,7 @@ export type ControlRequest =
   | { action: "reject"; client_action_id: string; message: string }
   | { action: "pause" }
   | { action: "approve" }
+  | { action: "defer" }
   | { action: "reset"; confirm: true };
 
 export interface ControlResponse {

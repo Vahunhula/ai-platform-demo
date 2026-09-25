@@ -19,6 +19,7 @@ from ai_platform.models import (
     PhaseModelPreference,
     QueuedMessage,
     TaskDefinition,
+    TaskDisposition,
     TaskRecord,
     TaskStatus,
     VerificationConfig,
@@ -115,6 +116,7 @@ class SQLiteStorage:
                     title TEXT NOT NULL,
                     difficulty TEXT NOT NULL,
                     status TEXT NOT NULL,
+                    disposition TEXT,
                     workflow_phase TEXT NOT NULL DEFAULT 'BRAINSTORM',
                     default_model_selection TEXT NOT NULL DEFAULT 'AUTO',
                     selected_tier TEXT,
@@ -131,6 +133,8 @@ class SQLiteStorage:
                     execution_started_at TEXT,
                     execution_heartbeat_at TEXT,
                     pause_requested INTEGER NOT NULL DEFAULT 0,
+                    removal_started_at TEXT,
+                    removal_started_by TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 )
@@ -139,6 +143,7 @@ class SQLiteStorage:
             self._create_or_migrate_events(connection)
             self._migrate_task_columns(connection)
             self._create_repository_table(connection)
+            self._create_removed_tasks_table(connection)
             self._create_workflow_tables(connection)
             self._migrate_workflow_artifact_provenance(connection)
             self._create_model_routing_table(connection)
@@ -157,10 +162,15 @@ class SQLiteStorage:
                 END
                 """
             )
+            connection.execute("DROP TRIGGER IF EXISTS events_are_append_only_delete")
             connection.execute(
                 """
-                CREATE TRIGGER IF NOT EXISTS events_are_append_only_delete
+                CREATE TRIGGER events_are_append_only_delete
                 BEFORE DELETE ON events
+                WHEN NOT EXISTS (
+                    SELECT 1 FROM tasks
+                    WHERE task_id = OLD.task_id AND removal_started_at IS NOT NULL
+                )
                 BEGIN
                     SELECT RAISE(ABORT, 'events are append-only');
                 END
@@ -218,6 +228,11 @@ class SQLiteStorage:
 
         now = datetime.now(UTC).isoformat()
         with self._connect() as connection:
+            removed = connection.execute(
+                "SELECT 1 FROM removed_tasks WHERE task_id = ?", (task.id,)
+            ).fetchone()
+            if removed is not None:
+                return False
             cursor = connection.execute(
                 """
                 INSERT OR IGNORE INTO tasks (
@@ -238,18 +253,23 @@ class SQLiteStorage:
             )
             return cursor.rowcount == 1
 
-    def get_task(self, task_id: str) -> TaskRecord | None:
+    def get_task(self, task_id: str, *, include_removing: bool = False) -> TaskRecord | None:
         """Return runtime state for one task."""
 
         with self._connect() as connection:
-            row = connection.execute("SELECT * FROM tasks WHERE task_id = ?", (task_id,)).fetchone()
+            suffix = "" if include_removing else " AND removal_started_at IS NULL"
+            row = connection.execute(
+                f"SELECT * FROM tasks WHERE task_id = ?{suffix}", (task_id,)
+            ).fetchone()
         return self._record_from_row(row) if row else None
 
     def list_tasks(self) -> list[TaskRecord]:
         """Return all task runtime records in stable ID order."""
 
         with self._connect() as connection:
-            rows = connection.execute("SELECT * FROM tasks ORDER BY task_id").fetchall()
+            rows = connection.execute(
+                "SELECT * FROM tasks WHERE removal_started_at IS NULL ORDER BY task_id"
+            ).fetchall()
         return [self._record_from_row(row) for row in rows]
 
     def update_task_status(self, task_id: str, status: TaskStatus) -> None:
@@ -679,7 +699,7 @@ class SQLiteStorage:
                 """
                 UPDATE tasks
                 SET status = ?, selected_tier = NULL, selected_model = NULL,
-                    attempt = 0, verification_status = ?, workspace_path = NULL,
+                    disposition = NULL, attempt = 0, verification_status = ?, workspace_path = NULL,
                     active_execution = NULL, execution_owner = NULL,
                     execution_id = NULL, execution_actor_id = NULL,
                     execution_pid = NULL, execution_hostname = NULL,
@@ -703,7 +723,7 @@ class SQLiteStorage:
                 """
                 UPDATE tasks
                 SET status = ?, selected_tier = NULL, selected_model = NULL,
-                    attempt = 0, verification_status = ?, workspace_path = ?,
+                    disposition = NULL, attempt = 0, verification_status = ?, workspace_path = ?,
                     active_execution = NULL, execution_owner = NULL, execution_id = NULL,
                     execution_actor_id = NULL, execution_pid = NULL,
                     execution_hostname = NULL, execution_started_at = NULL,
@@ -808,6 +828,7 @@ class SQLiteStorage:
                     execution_actor_id = ?, execution_pid = ?, execution_hostname = ?,
                     execution_started_at = ?, execution_heartbeat_at = ?, updated_at = ?
                 WHERE task_id = ? AND active_execution IS NULL AND pause_requested = 0
+                  AND removal_started_at IS NULL
                   AND status IN ({placeholders})
                 """,
                 (
@@ -993,9 +1014,9 @@ class SQLiteStorage:
             cursor = connection.execute(
                 """
                 UPDATE tasks
-                SET status = ?, updated_at = ?
+                SET status = ?, disposition = ?, updated_at = ?
                 WHERE task_id = ? AND status = ? AND verification_status = ?
-                  AND active_execution IS NULL
+                  AND active_execution IS NULL AND removal_started_at IS NULL
                   AND NOT EXISTS (
                       SELECT 1 FROM message_queue
                       WHERE message_queue.task_id = tasks.task_id AND status IN (?, ?)
@@ -1003,6 +1024,7 @@ class SQLiteStorage:
                 """,
                 (
                     TaskStatus.COMPLETED.value,
+                    TaskDisposition.CONFIRMED.value,
                     datetime.now(UTC).isoformat(),
                     task_id,
                     TaskStatus.WAITING_FOR_HUMAN.value,
@@ -1011,6 +1033,110 @@ class SQLiteStorage:
                     MessageStatus.RUNNING.value,
                 ),
             )
+            return cursor.rowcount == 1
+
+    def try_defer_task(self, task_id: str) -> bool:
+        """Atomically record a terminal deferred human disposition."""
+
+        with self._connect(immediate=True) as connection:
+            cursor = connection.execute(
+                """
+                UPDATE tasks
+                SET status = ?, disposition = ?, updated_at = ?
+                WHERE task_id = ? AND status = ? AND workflow_phase = ?
+                  AND active_execution IS NULL AND removal_started_at IS NULL
+                  AND NOT EXISTS (
+                      SELECT 1 FROM message_queue
+                      WHERE message_queue.task_id = tasks.task_id AND status IN (?, ?)
+                  )
+                """,
+                (
+                    TaskStatus.COMPLETED.value,
+                    TaskDisposition.DEFERRED.value,
+                    datetime.now(UTC).isoformat(),
+                    task_id,
+                    TaskStatus.WAITING_FOR_HUMAN.value,
+                    WorkflowPhase.HUMAN_REVIEW.value,
+                    MessageStatus.QUEUED.value,
+                    MessageStatus.RUNNING.value,
+                ),
+            )
+            return cursor.rowcount == 1
+
+    def begin_task_removal(self, task_id: str, actor_id: str) -> TaskRecord | None:
+        """Fail closed and mark a terminal task unavailable to all other operations."""
+
+        now = datetime.now(UTC).isoformat()
+        terminal = tuple(disposition.value for disposition in TaskDisposition)
+        with self._connect(immediate=True) as connection:
+            row = connection.execute(
+                "SELECT * FROM tasks WHERE task_id = ?", (task_id,)
+            ).fetchone()
+            if row is None:
+                return None
+            if row["removal_started_at"] is not None:
+                return self._record_from_row(row)
+            if (
+                row["disposition"] not in terminal
+                or row["status"] != TaskStatus.COMPLETED.value
+            ):
+                raise ValueError("Task is not CONFIRMED or DEFERRED")
+            if row["active_execution"] is not None:
+                raise RuntimeError("Task has an active workspace writer")
+            pending = connection.execute(
+                "SELECT COUNT(*) FROM message_queue WHERE task_id = ? AND status IN (?, ?)",
+                (task_id, MessageStatus.QUEUED.value, MessageStatus.RUNNING.value),
+            ).fetchone()[0]
+            if pending:
+                raise RuntimeError("Task has accepted human instructions still queued")
+            cursor = connection.execute(
+                """
+                UPDATE tasks SET removal_started_at = ?, removal_started_by = ?, updated_at = ?
+                WHERE task_id = ? AND removal_started_at IS NULL
+                  AND active_execution IS NULL AND disposition IN (?, ?)
+                  AND status = ?
+                """,
+                (now, actor_id, now, task_id, *terminal, TaskStatus.COMPLETED.value),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("Task changed while removal was starting")
+            updated = connection.execute(
+                "SELECT * FROM tasks WHERE task_id = ?", (task_id,)
+            ).fetchone()
+        return self._record_from_row(updated)
+
+    def delete_task_metadata(self, task_id: str) -> bool:
+        """Delete exactly one guarded task and every task-owned row in one transaction."""
+
+        with self._connect(immediate=True) as connection:
+            guarded = connection.execute(
+                "SELECT 1 FROM tasks WHERE task_id = ? AND removal_started_at IS NOT NULL",
+                (task_id,),
+            ).fetchone()
+            if guarded is None:
+                return False
+            connection.execute(
+                """
+                INSERT OR REPLACE INTO removed_tasks (task_id, deleted_at, deleted_by)
+                SELECT task_id, ?, removal_started_by FROM tasks WHERE task_id = ?
+                """,
+                (datetime.now(UTC).isoformat(), task_id),
+            )
+            connection.execute(
+                "DELETE FROM checklist_evaluation_items WHERE evaluation_id IN "
+                "(SELECT evaluation_id FROM checklist_evaluations WHERE task_id = ?)",
+                (task_id,),
+            )
+            for table in (
+                "checklist_evaluations",
+                "workflow_artifacts",
+                "task_phase_model_preferences",
+                "message_queue",
+                "task_presence",
+                "events",
+            ):
+                connection.execute(f"DELETE FROM {table} WHERE task_id = ?", (task_id,))
+            cursor = connection.execute("DELETE FROM tasks WHERE task_id = ?", (task_id,))
             return cursor.rowcount == 1
 
     def pending_message_count(self, task_id: str) -> int:
@@ -1083,10 +1209,15 @@ class SQLiteStorage:
                 return self._queued_message_from_row(existing), False
             if accepting_statuses is not None:
                 row = connection.execute(
-                    "SELECT status FROM tasks WHERE task_id = ?", (event.task_id,)
+                    "SELECT status, removal_started_at FROM tasks WHERE task_id = ?",
+                    (event.task_id,),
                 ).fetchone()
                 allowed = {status.value for status in accepting_statuses}
-                if row is None or row["status"] not in allowed:
+                if (
+                    row is None
+                    or row["removal_started_at"] is not None
+                    or row["status"] not in allowed
+                ):
                     return None
             self._insert_event(connection, event)
             now = datetime.now(UTC).isoformat()
@@ -1261,6 +1392,7 @@ class SQLiteStorage:
             description=row["description"],
             difficulty=row["difficulty"],
             status=row["status"],
+            disposition=row["disposition"],
             workflow_phase=row["workflow_phase"],
             default_model_selection=row["default_model_selection"],
             selected_tier=row["selected_tier"],
@@ -1292,6 +1424,8 @@ class SQLiteStorage:
             execution_started_at=row["execution_started_at"],
             execution_heartbeat_at=row["execution_heartbeat_at"],
             pause_requested=bool(row["pause_requested"]),
+            removal_started_at=row["removal_started_at"],
+            removal_started_by=row["removal_started_by"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],
         )
@@ -1392,7 +1526,8 @@ class SQLiteStorage:
             raise ValueError(f"Unsupported task field: {field}")
         with self._connect() as connection:
             cursor = connection.execute(
-                f"UPDATE tasks SET {field} = ?, updated_at = ? WHERE task_id = ?",
+                f"UPDATE tasks SET {field} = ?, updated_at = ? "
+                "WHERE task_id = ? AND removal_started_at IS NULL",
                 (value, datetime.now(UTC).isoformat(), task_id),
             )
             if cursor.rowcount != 1:
@@ -1400,6 +1535,11 @@ class SQLiteStorage:
 
     @staticmethod
     def _insert_event(connection: sqlite3.Connection, event: Event) -> None:
+        task = connection.execute(
+            "SELECT removal_started_at FROM tasks WHERE task_id = ?", (event.task_id,)
+        ).fetchone()
+        if task is None or task["removal_started_at"] is not None:
+            raise KeyError(event.task_id)
         cursor = connection.execute(
             """
             INSERT INTO events (
@@ -1423,6 +1563,7 @@ class SQLiteStorage:
         columns = {row["name"] for row in connection.execute("PRAGMA table_info(tasks)")}
         migrations = {
             "description": "ALTER TABLE tasks ADD COLUMN description TEXT",
+            "disposition": "ALTER TABLE tasks ADD COLUMN disposition TEXT",
             "attempt": "ALTER TABLE tasks ADD COLUMN attempt INTEGER NOT NULL DEFAULT 0",
             "verification_status": (
                 "ALTER TABLE tasks ADD COLUMN verification_status TEXT NOT NULL DEFAULT 'not_run'"
@@ -1439,6 +1580,8 @@ class SQLiteStorage:
             "pause_requested": (
                 "ALTER TABLE tasks ADD COLUMN pause_requested INTEGER NOT NULL DEFAULT 0"
             ),
+            "removal_started_at": "ALTER TABLE tasks ADD COLUMN removal_started_at TEXT",
+            "removal_started_by": "ALTER TABLE tasks ADD COLUMN removal_started_by TEXT",
             "repository_id": "ALTER TABLE tasks ADD COLUMN repository_id TEXT",
             "base_branch": "ALTER TABLE tasks ADD COLUMN base_branch TEXT",
             "assignee_user_id": "ALTER TABLE tasks ADD COLUMN assignee_user_id TEXT",
@@ -1615,13 +1758,42 @@ class SQLiteStorage:
                 BEGIN SELECT RAISE(ABORT, '{table} is append-only'); END
                 """
             )
-            connection.execute(
-                f"""
-                CREATE TRIGGER IF NOT EXISTS {table}_append_only_delete
-                BEFORE DELETE ON {table}
-                BEGIN SELECT RAISE(ABORT, '{table} is append-only'); END
-                """
+            connection.execute(f"DROP TRIGGER IF EXISTS {table}_append_only_delete")
+        connection.execute(
+            """
+            CREATE TRIGGER workflow_artifacts_append_only_delete
+            BEFORE DELETE ON workflow_artifacts
+            WHEN NOT EXISTS (
+                SELECT 1 FROM tasks
+                WHERE task_id = OLD.task_id AND removal_started_at IS NOT NULL
             )
+            BEGIN SELECT RAISE(ABORT, 'workflow_artifacts is append-only'); END
+            """
+        )
+        connection.execute(
+            """
+            CREATE TRIGGER checklist_evaluations_append_only_delete
+            BEFORE DELETE ON checklist_evaluations
+            WHEN NOT EXISTS (
+                SELECT 1 FROM tasks
+                WHERE task_id = OLD.task_id AND removal_started_at IS NOT NULL
+            )
+            BEGIN SELECT RAISE(ABORT, 'checklist_evaluations is append-only'); END
+            """
+        )
+        connection.execute(
+            """
+            CREATE TRIGGER checklist_evaluation_items_append_only_delete
+            BEFORE DELETE ON checklist_evaluation_items
+            WHEN NOT EXISTS (
+                SELECT 1 FROM checklist_evaluations AS evaluations
+                JOIN tasks ON tasks.task_id = evaluations.task_id
+                WHERE evaluations.evaluation_id = OLD.evaluation_id
+                  AND tasks.removal_started_at IS NOT NULL
+            )
+            BEGIN SELECT RAISE(ABORT, 'checklist_evaluation_items is append-only'); END
+            """
+        )
 
     @staticmethod
     def _migrate_workflow_artifact_provenance(connection: sqlite3.Connection) -> None:
@@ -1663,6 +1835,20 @@ class SQLiteStorage:
                 enabled INTEGER NOT NULL DEFAULT 1,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
+            )
+            """
+        )
+
+    @staticmethod
+    def _create_removed_tasks_table(connection: sqlite3.Connection) -> None:
+        """Minimal global tombstone required to stop seed tasks reappearing on restart."""
+
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS removed_tasks (
+                task_id TEXT PRIMARY KEY,
+                deleted_at TEXT NOT NULL,
+                deleted_by TEXT NOT NULL
             )
             """
         )

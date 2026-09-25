@@ -20,6 +20,7 @@ import type {
   TaskModelRouting,
   CommandMetadata,
   CommandResult,
+  ClaudeCommandMetadata,
 } from "../types/api";
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/$/, "");
@@ -127,6 +128,14 @@ export const api = {
       `${task(taskId)}/commands`,
       post({ command_text: commandText, client_command_id: clientCommandId }),
     ),
+  getClaudeCommands: (taskId: string, signal?: AbortSignal) =>
+    request<ClaudeCommandMetadata[]>(`${task(taskId)}/claude-commands`, { signal }),
+  executeClaudeCommand: (taskId: string, commandText: string, clientCommandId: string) =>
+    request<CommandResult>(
+      `${task(taskId)}/claude-commands`,
+      post({ command_text: commandText, client_command_id: clientCommandId }),
+    ),
+  removeTask: (taskId: string) => request<void>(task(taskId), { method: "DELETE" }),
   control: (taskId: string, { action, ...body }: ControlRequest) =>
     request<ControlResponse>(`${task(taskId)}/${action}`, {
       method: "POST",

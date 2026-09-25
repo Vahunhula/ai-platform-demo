@@ -400,7 +400,7 @@ async def test_backend_reports_action_availability_per_state(harness: Harness) -
     assert ready["actions"]["approve"]["reason"] == (
         "Task cannot be approved until it is waiting for human review."
     )
-    assert _allowed(waiting) == {"pause", "approve", "reject", "reset"}
+    assert _allowed(waiting) == {"pause", "approve", "defer", "reject", "reset"}
     assert _allowed(paused) == {"resume", "reset"}
     assert paused["actions"]["pause"]["reason"] == "Task is already paused."
 

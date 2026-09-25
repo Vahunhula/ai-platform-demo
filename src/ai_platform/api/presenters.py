@@ -39,6 +39,7 @@ from ai_platform.models import (
     TaskDefinition,
     TaskRecord,
 )
+from ai_platform.removal import RemovalAvailability
 from ai_platform.sessions import TaskSession
 
 _COMMON_PUBLIC_METADATA = {
@@ -113,6 +114,10 @@ _COMMON_PUBLIC_METADATA = {
     "task_status",
     "result_category",
     "command_result",
+    "namespace",
+    "classification",
+    "executor",
+    "disposition",
 }
 _TEST_EVENTS = {EventType.TEST_STARTED, EventType.TEST_PASSED, EventType.TEST_FAILED}
 # A path component continues with these characters; a placeholder must not cut one in half.
@@ -256,6 +261,7 @@ class Presenter:
         queued_messages: int,
         actions: dict[ControlAction, ActionAvailability],
         *,
+        removal: RemovalAvailability,
         latest_readiness: ReadinessSummary | None = None,
     ) -> TaskDetailResponse:
         record = session.record
@@ -287,6 +293,9 @@ class Presenter:
             created_at=record.created_at,
             default_model_selection=record.default_model_selection,
             latest_readiness=latest_readiness,
+            disposition=record.disposition,
+            can_remove=removal.allowed,
+            remove_disabled_reason=removal.reason,
         )
 
     def _verification_result(self, events: list[Event]) -> VerificationResultResponse | None:

@@ -56,3 +56,25 @@ def test_generic_platform_command_uses_registry_service(tmp_path: Path) -> None:
         EventType.COMMAND_SUCCEEDED,
     ]
     assert events[-2].actor_id == "cli-command-user"
+
+
+def test_generic_claude_command_uses_allowlisted_service(tmp_path: Path) -> None:
+    env = {
+        "AI_PLATFORM_DATA_DIR": str(tmp_path / "data"),
+        "AI_PLATFORM_WORKSPACE_ROOT": str(tmp_path / "workspaces"),
+        "AI_PLATFORM_DB_PATH": str(tmp_path / "data" / "platform.db"),
+        "AI_PLATFORM_CHECKPOINT_DB_PATH": str(tmp_path / "data" / "checkpoints.db"),
+        "AI_PLATFORM_USER": "cli-claude-user",
+    }
+
+    result = CliRunner().invoke(
+        app, ["claude-command", "DEMO-1", "claude/status"], env=env
+    )
+
+    assert result.exit_code == 0
+    assert "claude/status" in result.stdout
+    assert "workspace_write" in result.stdout
+    storage = SQLiteStorage(tmp_path / "data" / "platform.db")
+    events = storage.get_events("DEMO-1")
+    assert events[-2].metadata["namespace"] == "claude"
+    assert events[-2].actor_id == "cli-claude-user"

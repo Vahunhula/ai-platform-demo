@@ -4,6 +4,7 @@ import { ApiError, api } from "../api/client";
 import { newClientId } from "../api/ids";
 import type {
   CommandMetadata,
+  ClaudeCommandMetadata,
   CommandResult,
   ConfigResponse,
   ConversationMessage,
@@ -41,7 +42,9 @@ export function ChatPanel({ detail, config, user, messages, events, onSubmitted 
   const [pending, setPending] = useState<PendingMessage[]>([]);
   const [composerError, setComposerError] = useState<string | null>(null);
   const [commands, setCommands] = useState<CommandMetadata[]>([]);
+  const [claudeCommands, setClaudeCommands] = useState<ClaudeCommandMetadata[]>([]);
   const [commandResult, setCommandResult] = useState<CommandResult | null>(null);
+  const [commandResultNamespace, setCommandResultNamespace] = useState<"platform" | "claude">("platform");
   const [commandBusy, setCommandBusy] = useState(false);
   const [menuDismissed, setMenuDismissed] = useState(false);
   const [activeCommand, setActiveCommand] = useState(0);
@@ -62,15 +65,21 @@ export function ChatPanel({ detail, config, user, messages, events, onSubmitted 
     setComposerError(null);
     setCommandResult(null);
     setCommands([]);
+    setClaudeCommands([]);
     setMenuDismissed(false);
     stickToBottom.current = true;
   }, [detail.id]);
 
   useEffect(() => {
     const controller = new AbortController();
-    api
-      .getCommands(detail.id, controller.signal)
-      .then(setCommands)
+    Promise.all([
+      api.getCommands(detail.id, controller.signal),
+      api.getClaudeCommands(detail.id, controller.signal),
+    ])
+      .then(([platform, claude]) => {
+        setCommands(platform);
+        setClaudeCommands(claude);
+      })
       .catch((reason: unknown) => {
         if (!(reason instanceof DOMException && reason.name === "AbortError")) {
           setComposerError(reason instanceof Error ? reason.message : String(reason));
@@ -94,13 +103,15 @@ export function ChatPanel({ detail, config, user, messages, events, onSubmitted 
       ? (detail.messaging.reason ?? "This task cannot receive messages in its current state.")
       : null;
   const trimmedDraft = draft.trim();
-  const isCommand = trimmedDraft.startsWith("/");
+  const isPlatformCommand = trimmedDraft.startsWith("/");
+  const isClaudeCommand = trimmedDraft.toLowerCase().startsWith("claude/");
+  const isCommand = isPlatformCommand || isClaudeCommand;
   const commandPrefix = trimmedDraft.split(/\s/, 1)[0].toLowerCase();
-  const matchingCommands = commands.filter((command) =>
-    command.name.toLowerCase().startsWith(commandPrefix),
-  );
+  const matchingCommands = isClaudeCommand
+    ? claudeCommands.filter((command) => command.command.toLowerCase().startsWith(commandPrefix))
+    : commands.filter((command) => command.name.toLowerCase().startsWith(commandPrefix));
   const showCommandMenu =
-    !menuDismissed && draft.trimStart().startsWith("/") && !draft.trimStart().includes(" ");
+    !menuDismissed && isCommand && !draft.trimStart().includes(" ");
   const commandEvents = events.filter((event) => event.event_type.startsWith("COMMAND_"));
 
   async function send(text: string, clientMessageId: string) {
@@ -142,8 +153,12 @@ export function ChatPanel({ detail, config, user, messages, events, onSubmitted 
     setCommandResult(null);
     setCommandBusy(true);
     try {
-      const result = await api.executeCommand(detail.id, text, newClientId());
+      const claude = text.trimStart().toLowerCase().startsWith("claude/");
+      const result = claude
+        ? await api.executeClaudeCommand(detail.id, text, newClientId())
+        : await api.executeCommand(detail.id, text, newClientId());
       setCommandResult(result);
+      setCommandResultNamespace(claude ? "claude" : "platform");
       setDraft("");
       setMenuDismissed(false);
       onSubmitted();
@@ -159,7 +174,7 @@ export function ChatPanel({ detail, config, user, messages, events, onSubmitted 
   function submit() {
     const text = draft.trim();
     if (!text || text.length > maxLength) return;
-    if (text.startsWith("/")) {
+    if (text.startsWith("/") || text.toLowerCase().startsWith("claude/")) {
       void execute(text);
       return;
     }
@@ -236,13 +251,14 @@ export function ChatPanel({ detail, config, user, messages, events, onSubmitted 
         ))}
         {commandEvents.map((event) => {
           const command = String(event.metadata.command ?? "/command");
+          const claude = event.metadata.namespace === "claude";
           const args = String(event.metadata.arguments ?? "");
           const result = String(event.metadata.command_result ?? "");
           const invoked = event.event_type === "COMMAND_INVOKED";
           return (
             <article className={`message command ${invoked ? "human" : "platform"}`} key={event.sequence_id}>
               <div className="event-heading">
-                <strong>{invoked ? event.actor_display_name : "Platform"}</strong>
+                <strong>{invoked ? event.actor_display_name : claude ? "Claude command" : "Platform"}</strong>
                 <time>#{event.sequence_id} · {formatTime(event.timestamp)}</time>
               </div>
               <p>{invoked ? `${command}${args ? ` ${args}` : ""}` : result || event.event_type}</p>
@@ -285,14 +301,22 @@ export function ChatPanel({ detail, config, user, messages, events, onSubmitted 
       <div className="composer">
         {commandResult && (
           <div className="command-result" role="status">
-            <strong>Platform</strong> {commandResult.message}
+            <strong>{commandResultNamespace === "claude" ? "Claude command" : "Platform"}</strong>{" "}
+            {commandResult.message}
           </div>
         )}
         {composerError && <div className="composer-error">{composerError}</div>}
         {showCommandMenu && (
-          <div className="command-menu" role="listbox" aria-label="Platform commands">
+          <div
+            className={`command-menu ${isClaudeCommand ? "claude" : "platform"}`}
+            role="listbox"
+            aria-label={isClaudeCommand ? "Claude commands" : "Platform commands"}
+          >
+            <div className="command-namespace">{isClaudeCommand ? "Claude" : "Platform"}</div>
             {matchingCommands.length === 0 ? (
-              <div className="command-empty">No matching platform command</div>
+              <div className="command-empty">
+                No matching {isClaudeCommand ? "Claude" : "platform"} command
+              </div>
             ) : (
               matchingCommands.map((command, index) => (
                 <button
@@ -300,14 +324,20 @@ export function ChatPanel({ detail, config, user, messages, events, onSubmitted 
                   role="option"
                   aria-selected={index === activeCommand}
                   className={`${index === activeCommand ? "active" : ""} ${command.available ? "" : "disabled"}`}
-                  key={command.name}
+                  key={"command" in command ? command.command : command.name}
                   onMouseDown={(event) => event.preventDefault()}
                   onClick={() => {
                     setDraft(command.usage);
                     setMenuDismissed(true);
                   }}
                 >
-                  <span><strong>{command.name}</strong> {command.description}</span>
+                  <span>
+                    <strong>{"command" in command ? command.command : command.name}</strong>{" "}
+                    {command.description}
+                    {"classification" in command && (
+                      <small className="classification"> {command.classification}</small>
+                    )}
+                  </span>
                   {!command.available && <small>{command.disabled_reason}</small>}
                 </button>
               ))
@@ -334,7 +364,9 @@ export function ChatPanel({ detail, config, user, messages, events, onSubmitted 
         <div className="composer-footer">
           <span className="muted">
             {isCommand
-              ? "Platform commands are deterministic and are not sent to Claude."
+              ? isClaudeCommand
+                ? "Claude commands are allowlisted and audited; no shell passthrough."
+                : "Platform commands are deterministic and are not sent to Claude."
               : disabledReason
               ? "Read-only"
               : working

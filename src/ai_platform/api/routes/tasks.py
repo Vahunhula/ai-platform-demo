@@ -1,11 +1,12 @@
 """Read-only task, history, and workspace-diff endpoints."""
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Response
 
 from ai_platform.api.dependencies import (
     ContextDependency,
     ControlsDependency,
     PresenterDependency,
+    RemovalDependency,
     TaskCreationDependency,
 )
 from ai_platform.api.presenters import queued_count
@@ -84,6 +85,7 @@ def get_task(
     controls: ControlsDependency,
     presenter: PresenterDependency,
     user: UserDependency,
+    removal: RemovalDependency,
 ) -> TaskDetailResponse:
     session = context.sessions.get_session(task_id)
     queued = queued_count(context.storage.list_queued_messages(session.definition.id))
@@ -98,7 +100,31 @@ def get_task(
         if evaluations
         else None
     )
-    return presenter.task_detail(session, user, queued, actions, latest_readiness=latest_readiness)
+    removal_state = removal.availability(session.record, user)
+    return presenter.task_detail(
+        session,
+        user,
+        queued,
+        actions,
+        latest_readiness=latest_readiness,
+        removal=removal_state,
+    )
+
+
+@router.delete(
+    "/{task_id}",
+    status_code=204,
+    responses={401: {}, 403: {}, 404: {}, 409: {}},
+)
+def remove_task(
+    task_id: str,
+    removal: RemovalDependency,
+    user: DeveloperDependency,
+) -> Response:
+    """Permanently remove one terminal TaskSession and its owned resources."""
+
+    removal.remove(task_id.upper(), user)
+    return Response(status_code=204)
 
 
 @router.get("/{task_id}/events", response_model=list[EventResponse])

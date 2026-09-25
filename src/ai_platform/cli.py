@@ -16,6 +16,7 @@ from rich.table import Table
 from ai_platform.application import ApplicationContext, create_application_context
 from ai_platform.approval import ApprovalError
 from ai_platform.auth import AuthenticatedUser, AuthService, Role, UserManagementError
+from ai_platform.claude_commands import ClaudeCommandService
 from ai_platform.commands import CommandError, CommandService
 from ai_platform.config import Settings
 from ai_platform.controls import TaskControlService
@@ -115,6 +116,20 @@ def platform_command(task_id: str, command_text: str) -> None:
     except (CommandError, TaskSessionError, WorkflowError) as error:
         _exit_with_error(error)
     console.print(f"[bold cyan]{escape(result.command)}[/bold cyan] {escape(result.message)}")
+    console.print_json(data=result.data)
+
+
+@app.command("claude-command")
+def claude_command(task_id: str, command_text: str) -> None:
+    """Execute one allowlisted Claude namespace command for a task."""
+
+    context = _application_context()
+    service = ClaudeCommandService(context.sessions, context.storage, context.settings)
+    try:
+        result = service.execute(task_id, command_text, _cli_user(), f"cli-{uuid4().hex}")
+    except (CommandError, TaskSessionError) as error:
+        _exit_with_error(error)
+    console.print(f"[bold magenta]{escape(result.command)}[/bold magenta] {escape(result.message)}")
     console.print_json(data=result.data)
 
 

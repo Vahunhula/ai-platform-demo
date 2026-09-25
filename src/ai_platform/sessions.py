@@ -165,7 +165,9 @@ class TaskSessionService:
     def get_definition(self, task_id: str) -> TaskDefinition:
         """Return a validated task definition through the application service."""
 
-        return self._definition(task_id)
+        definition = self._definition(task_id)
+        self._record(definition.id)
+        return definition
 
     def get_events(self, task_id: str) -> list[Event]:
         """Return one task's durable event stream in sequence order."""

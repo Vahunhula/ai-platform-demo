@@ -13,7 +13,9 @@ import { ChatPanel } from "./ChatPanel";
 
 const mocks = vi.hoisted(() => ({
   getCommands: vi.fn(),
+  getClaudeCommands: vi.fn(),
   executeCommand: vi.fn(),
+  executeClaudeCommand: vi.fn(),
   postMessage: vi.fn(),
 }));
 
@@ -62,7 +64,7 @@ const detail = {
   queued_messages: 0,
   messaging: { accepting: true, reason: null },
   actions: Object.fromEntries(
-    ["start", "pause", "resume", "approve", "reject", "reset"].map((name) => [
+    ["start", "pause", "resume", "approve", "defer", "reject", "reset"].map((name) => [
       name,
       { allowed: false, reason: "Unavailable" },
     ]),
@@ -70,6 +72,9 @@ const detail = {
   created_at: "2026-01-01T00:00:00Z",
   default_model_selection: "AUTO",
   latest_readiness: null,
+  disposition: null,
+  can_remove: false,
+  remove_disabled_reason: "Only terminal tasks can be removed.",
 } as TaskDetail;
 
 const command = (
@@ -107,6 +112,7 @@ afterEach(() => {
 
 describe("platform command composer", () => {
   it("opens for slash prefixes, filters, shows disabled reasons, and selects with Enter", async () => {
+    mocks.getClaudeCommands.mockResolvedValue([]);
     mocks.getCommands.mockResolvedValue([
       command("/review"),
       command("/reject", false, "Only while waiting for review."),
@@ -125,6 +131,7 @@ describe("platform command composer", () => {
   });
 
   it("keeps ordinary text on the message API and sends leading slash text to command API", async () => {
+    mocks.getClaudeCommands.mockResolvedValue([]);
     mocks.getCommands.mockResolvedValue([command("/status")]);
     mocks.postMessage.mockResolvedValue({});
     mocks.executeCommand.mockResolvedValue({
@@ -145,5 +152,54 @@ describe("platform command composer", () => {
     fireEvent.click(screen.getByRole("button", { name: "Run command" }));
     await waitFor(() => expect(mocks.executeCommand).toHaveBeenCalledOnce());
     expect(mocks.executeCommand.mock.calls[0][1]).toBe("/status");
+  });
+
+  it("opens a distinct Claude catalog, filters it, and never treats mentions as commands", async () => {
+    mocks.getCommands.mockResolvedValue([command("/status")]);
+    mocks.getClaudeCommands.mockResolvedValue([
+      {
+        namespace: "claude",
+        command: "claude/help",
+        description: "Audited help",
+        usage: "claude/help",
+        classification: "ADAPTED",
+        required_permission: "viewer",
+        executor_capability: "registry_metadata",
+        available: true,
+        disabled_reason: null,
+      },
+      {
+        namespace: "claude",
+        command: "claude/status",
+        description: "Safe status",
+        usage: "claude/status",
+        classification: "ADAPTED",
+        required_permission: "viewer",
+        executor_capability: "platform_executor_status",
+        available: true,
+        disabled_reason: null,
+      },
+    ]);
+    mocks.postMessage.mockResolvedValue({});
+    mocks.executeClaudeCommand.mockResolvedValue({
+      command: "claude/status",
+      status: "completed",
+      message: "Claude executor: claude",
+      data: {},
+    });
+    show();
+    const composer = screen.getByLabelText("Message");
+
+    fireEvent.change(composer, { target: { value: "claude/st" } });
+    await waitFor(() => expect(screen.getByRole("listbox", { name: "Claude commands" })).toBeTruthy());
+    expect(screen.getAllByRole("option")).toHaveLength(1);
+    fireEvent.keyDown(composer, { key: "Enter" });
+    expect((composer as HTMLTextAreaElement).value).toBe("claude/status");
+    fireEvent.keyDown(composer, { key: "Enter" });
+    await waitFor(() => expect(mocks.executeClaudeCommand).toHaveBeenCalledOnce());
+
+    fireEvent.change(composer, { target: { value: "Please inspect claude/config.py" } });
+    fireEvent.keyDown(composer, { key: "Enter" });
+    await waitFor(() => expect(mocks.postMessage).toHaveBeenCalledOnce());
   });
 });

@@ -27,6 +27,7 @@ from uuid import NAMESPACE_URL, uuid5
 
 from ai_platform.approval import ApprovalError
 from ai_platform.auth import AuthenticatedUser
+from ai_platform.events import ActorType, Event, EventType
 from ai_platform.models import (
     ExecutionKind,
     TaskRecord,
@@ -50,6 +51,7 @@ class ControlAction(StrEnum):
     PAUSE = "pause"
     RESUME = "resume"
     APPROVE = "approve"
+    DEFER = "defer"
     REJECT = "reject"
     RESET = "reset"
 
@@ -180,6 +182,19 @@ class TaskControlService:
                     f"still queued ({pending})."
                 )
             return None
+        if action is ControlAction.DEFER:
+            if status is not TaskStatus.WAITING_FOR_HUMAN:
+                return "Task can only be deferred while it is waiting for human review."
+            if record.workflow_phase is not WorkflowPhase.HUMAN_REVIEW:
+                return "Task can only be deferred from Human Review."
+            if writer:
+                return OWNED
+            if pending := self.storage.pending_message_count(record.task_id):
+                return (
+                    "A task cannot be deferred while accepted human instructions are "
+                    f"still queued ({pending})."
+                )
+            return None
         if action is ControlAction.REJECT:
             if status is not TaskStatus.WAITING_FOR_HUMAN:
                 return "Task can only be rejected while it is waiting for human review."
@@ -289,6 +304,38 @@ class TaskControlService:
         self._require(ControlAction.APPROVE, task.id)
         self._core(lambda: self.sessions.approve(task.id, user.human))
         return ControlResult(ControlAction.APPROVE, task.id, False)
+
+    def defer(self, task_id: str, user: AuthenticatedUser) -> ControlResult:
+        """Record an explicit terminal decision to stop work without confirmation."""
+
+        self._authorize(user)
+        task = self.sessions.get_definition(task_id)
+        self._require(ControlAction.DEFER, task.id)
+        if not self.storage.try_defer_task(task.id):
+            raise ActionConflictError("Task changed while it was being deferred.")
+        self.storage.append_event(
+            Event(
+                task_id=task.id,
+                event_type=EventType.HUMAN_DEFERRED,
+                actor_type=ActorType.HUMAN,
+                actor_id=user.username,
+                metadata={"display_name": user.display_name},
+            )
+        )
+        self.storage.append_event(
+            Event(
+                task_id=task.id,
+                event_type=EventType.STATUS_CHANGED,
+                actor_type=ActorType.SYSTEM,
+                actor_id="task-control",
+                metadata={
+                    "from": TaskStatus.WAITING_FOR_HUMAN.value,
+                    "to": TaskStatus.COMPLETED.value,
+                    "disposition": "DEFERRED",
+                },
+            )
+        )
+        return ControlResult(ControlAction.DEFER, task.id, False)
 
     def reset(self, task_id: str, user: AuthenticatedUser) -> ControlResult:
         self._authorize(user)

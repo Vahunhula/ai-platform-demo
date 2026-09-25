@@ -856,6 +856,9 @@ details summary {
 .command-menu button.active { background: rgb(70 120 220 / 12%); }
 .command-menu button.disabled { opacity: 0.65; }
 .command-menu small { margin-top: 0.2rem; color: var(--muted, #687080); }
+.command-menu.claude { border-color: #b9a3df; }
+.command-namespace { padding: 0.35rem 0.65rem; color: #6b4da2; font-size: 0.75rem; font-weight: 800; text-transform: uppercase; }
+.command-menu .classification { display: inline; margin-left: 0.35rem; color: #6b4da2; font-size: 0.68rem; }
 .command-empty { padding: 0.65rem; color: var(--muted, #687080); }
 .command-result { margin-bottom: 0.5rem; padding: 0.55rem; border-left: 3px solid #4a7bd0; }
 .message.platform { border-left: 3px solid #4a7bd0; }
