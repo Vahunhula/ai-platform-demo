@@ -260,6 +260,7 @@ def test_mutation_routes_are_exactly_auth_presence_messages_and_controls() -> No
             (f"/api/tasks/{{task_id}}/{name}", "POST")
             for name in (
                 "messages",
+                "commands",
                 "presence",
                 "start",
                 "pause",

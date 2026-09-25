@@ -107,6 +107,12 @@ _COMMON_PUBLIC_METADATA = {
     "provider",
     "resolution_source",
     "workflow_phase",
+    "command",
+    "arguments",
+    "client_command_id",
+    "task_status",
+    "result_category",
+    "command_result",
 }
 _TEST_EVENTS = {EventType.TEST_STARTED, EventType.TEST_PASSED, EventType.TEST_FAILED}
 # A path component continues with these characters; a placeholder must not cut one in half.

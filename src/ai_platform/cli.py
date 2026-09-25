@@ -4,6 +4,7 @@ import json
 from collections.abc import Callable
 from datetime import timedelta
 from pathlib import Path
+from uuid import uuid4
 
 import typer
 from rich.console import Console
@@ -14,8 +15,10 @@ from rich.table import Table
 
 from ai_platform.application import ApplicationContext, create_application_context
 from ai_platform.approval import ApprovalError
-from ai_platform.auth import AuthService, Role, UserManagementError
+from ai_platform.auth import AuthenticatedUser, AuthService, Role, UserManagementError
+from ai_platform.commands import CommandError, CommandService
 from ai_platform.config import Settings
+from ai_platform.controls import TaskControlService
 from ai_platform.doctor import CheckStatus, inspect_environment
 from ai_platform.events import ActorType, Event
 from ai_platform.identity import HumanIdentity, LocalIdentityProvider
@@ -23,11 +26,22 @@ from ai_platform.locks import ExecutionLockManager
 from ai_platform.models import TaskDefinition
 from ai_platform.repositories import RepositoryError
 from ai_platform.sessions import TaskSession, TaskSessionError, TurnOutcome
+from ai_platform.workflow_services import WorkflowError
 from ai_platform.workspace import WorkspaceError
 
 app = typer.Typer(no_args_is_help=True, help="AI Platform Demo CLI")
 SERVE_GRACEFUL_SHUTDOWN_SECONDS = 3
 console = Console()
+
+
+class _SynchronousCommandRunner:
+    """CLI adapter preserving its existing foreground turn behavior."""
+
+    def __init__(self, context: ApplicationContext) -> None:
+        self.context = context
+
+    def run_prepared_turn(self, prepared) -> None:  # noqa: ANN001
+        self.context.sessions.run_prepared(prepared)
 
 
 def _application_context() -> ApplicationContext:
@@ -73,6 +87,35 @@ def _identity_or_exit() -> HumanIdentity:
     except ValueError as error:
         console.print(f"[red]Identity error:[/red] {escape(str(error))}")
         raise typer.Exit(code=1) from None
+
+
+def _cli_user() -> AuthenticatedUser:
+    human = _identity_or_exit()
+    return AuthenticatedUser(
+        user_id=human.actor_id,
+        username=human.actor_id,
+        display_name=human.display_name,
+        role=Role.DEVELOPER,
+    )
+
+
+@app.command("command")
+def platform_command(task_id: str, command_text: str) -> None:
+    """Execute one registered platform slash command for a task."""
+
+    context = _application_context()
+    controls = TaskControlService(
+        context.sessions,
+        context.storage,
+        _SynchronousCommandRunner(context),
+    )
+    service = CommandService(context.sessions, context.storage, controls)
+    try:
+        result = service.execute(task_id, command_text, _cli_user(), f"cli-{uuid4().hex}")
+    except (CommandError, TaskSessionError, WorkflowError) as error:
+        _exit_with_error(error)
+    console.print(f"[bold cyan]{escape(result.command)}[/bold cyan] {escape(result.message)}")
+    console.print_json(data=result.data)
 
 
 @app.command("tasks")

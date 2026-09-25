@@ -22,6 +22,7 @@ atomic writer lock (start/resume/reject/reset), compare-and-set updates
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import Protocol
 from uuid import NAMESPACE_URL, uuid5
 
 from ai_platform.approval import ApprovalError
@@ -32,7 +33,6 @@ from ai_platform.models import (
     TaskStatus,
     VerificationStatus,
 )
-from ai_platform.runner import TaskTurnRunner
 from ai_platform.sessions import (
     ExecutorUnavailableError,
     PreparedTurn,
@@ -93,6 +93,12 @@ class ControlResult:
     deferred: bool | None = None
 
 
+class PreparedTurnRunner(Protocol):
+    """Minimal runner boundary used by HTTP (background) and CLI (foreground)."""
+
+    def run_prepared_turn(self, prepared: PreparedTurn) -> None: ...
+
+
 class TaskControlService:
     """HTTP-facing lifecycle controls that delegate every transition to the core."""
 
@@ -100,7 +106,7 @@ class TaskControlService:
         self,
         sessions: TaskSessionService,
         storage: SQLiteStorage,
-        runner: TaskTurnRunner | None,
+        runner: PreparedTurnRunner | None,
     ) -> None:
         self.sessions = sessions
         self.storage = storage

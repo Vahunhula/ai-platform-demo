@@ -18,6 +18,8 @@ import type {
   LogicalModel,
   ModelCatalogEntry,
   TaskModelRouting,
+  CommandMetadata,
+  CommandResult,
 } from "../types/api";
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/$/, "");
@@ -118,6 +120,13 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }),
+  getCommands: (taskId: string, signal?: AbortSignal) =>
+    request<CommandMetadata[]>(`${task(taskId)}/commands`, { signal }),
+  executeCommand: (taskId: string, commandText: string, clientCommandId: string) =>
+    request<CommandResult>(
+      `${task(taskId)}/commands`,
+      post({ command_text: commandText, client_command_id: clientCommandId }),
+    ),
   control: (taskId: string, { action, ...body }: ControlRequest) =>
     request<ControlResponse>(`${task(taskId)}/${action}`, {
       method: "POST",

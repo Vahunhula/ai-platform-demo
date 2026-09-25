@@ -360,6 +360,33 @@ class PostMessageResponse(BaseModel):
     duplicate: bool
 
 
+class CommandMetadataResponse(BaseModel):
+    name: str
+    description: str
+    usage: str
+    arguments: list[str]
+    required_permission: Literal["viewer", "developer"]
+    available: bool
+    disabled_reason: str | None
+    mutating: bool
+
+
+class ExecuteCommandRequest(BaseModel):
+    """Command text only; actor identity always comes from the session."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    command_text: str = Field(min_length=1, max_length=MAX_MESSAGE_LENGTH)
+    client_command_id: str = Field(pattern=r"^[A-Za-z0-9_-]{8,100}$")
+
+
+class CommandResultResponse(BaseModel):
+    command: str
+    status: Literal["completed", "accepted"]
+    message: str
+    data: dict[str, Any]
+
+
 ClientActionId = Field(pattern=r"^[A-Za-z0-9_-]{8,100}$")
 
 

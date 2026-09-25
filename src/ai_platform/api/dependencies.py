@@ -6,6 +6,7 @@ from fastapi import Depends, Request
 
 from ai_platform.api.presenters import Presenter
 from ai_platform.application import ApplicationContext
+from ai_platform.commands import CommandService
 from ai_platform.controls import TaskControlService
 from ai_platform.conversation import ConversationService
 from ai_platform.runner import TaskTurnRunner
@@ -26,6 +27,10 @@ def get_controls(request: Request) -> TaskControlService:
     return request.app.state.controls
 
 
+def get_commands(request: Request) -> CommandService:
+    return request.app.state.commands
+
+
 def get_presenter(request: Request) -> Presenter:
     return request.app.state.presenter
 
@@ -42,5 +47,6 @@ ContextDependency = Annotated[ApplicationContext, Depends(get_context)]
 ConversationDependency = Annotated[ConversationService, Depends(get_conversation)]
 PresenterDependency = Annotated[Presenter, Depends(get_presenter)]
 ControlsDependency = Annotated[TaskControlService, Depends(get_controls)]
+CommandsDependency = Annotated[CommandService, Depends(get_commands)]
 RunnerDependency = Annotated[TaskTurnRunner | None, Depends(get_runner)]
 TaskCreationDependency = Annotated[TaskCreationService, Depends(get_task_creation)]

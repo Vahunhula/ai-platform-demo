@@ -1,5 +1,7 @@
 """Application services for explicit workflow mutations."""
 
+from dataclasses import dataclass
+
 from ai_platform.auth import AuthenticatedUser
 from ai_platform.events import ActorType, Event, EventType
 from ai_platform.storage import SQLiteStorage
@@ -25,9 +27,29 @@ class WorkflowConflictError(WorkflowError):
     """The expected phase lost a concurrent transition race."""
 
 
+@dataclass(frozen=True, slots=True)
+class WorkflowAvailability:
+    allowed: bool
+    reason: str | None = None
+
+
 class WorkflowPhaseService:
     def __init__(self, storage: SQLiteStorage) -> None:
         self.storage = storage
+
+    @staticmethod
+    def availability(
+        current: WorkflowPhase,
+        target: WorkflowPhase,
+        actor: AuthenticatedUser,
+    ) -> WorkflowAvailability:
+        if not actor.role.can_modify_tasks:
+            return WorkflowAvailability(
+                False, "Read-only access: your role cannot change workflow phase"
+            )
+        if current is target:
+            return WorkflowAvailability(False, f"Task is already in {target.value}.")
+        return WorkflowAvailability(True)
 
     def transition(
         self,
@@ -39,12 +61,11 @@ class WorkflowPhaseService:
         reason: str | None = None,
         mode: TransitionMode = TransitionMode.MANUAL,
     ) -> WorkflowPhase:
-        if not actor.role.can_modify_tasks:
-            raise WorkflowError("Read-only access: your role cannot change workflow phase")
+        availability = self.availability(expected_from, target, actor)
+        if not availability.allowed:
+            raise WorkflowError(availability.reason or "Workflow transition is unavailable")
         if mode is not TransitionMode.MANUAL:
             raise WorkflowError("Automatic workflow transitions are not enabled in Phase 2")
-        if expected_from is target:
-            raise WorkflowError("Workflow phase must change")
         normalized_reason = reason.strip() if reason else None
         if normalized_reason and len(normalized_reason) > 4000:
             raise WorkflowError("Transition reason is too long")

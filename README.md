@@ -1,5 +1,9 @@
 # AI Platform Demo
 
+Platform slash commands are documented in
+[`docs/demo25-phase4-commands.md`](docs/demo25-phase4-commands.md). They are deterministic platform
+operations shared by the API, CLI, and browser; they are not Claude Code commands.
+
 Demo 2.5 Phase 2 workflow domain behavior is documented in
 [`docs/demo25-phase2-domain.md`](docs/demo25-phase2-domain.md).
 Demo 2.5 Phase 2.1 model selection and routing is documented in

@@ -203,6 +203,24 @@ export interface PostMessageResponse {
   duplicate: boolean;
 }
 
+export interface CommandMetadata {
+  name: string;
+  description: string;
+  usage: string;
+  arguments: string[];
+  required_permission: "viewer" | "developer";
+  available: boolean;
+  disabled_reason: string | null;
+  mutating: boolean;
+}
+
+export interface CommandResult {
+  command: string;
+  status: "completed" | "accepted";
+  message: string;
+  data: Record<string, unknown>;
+}
+
 /** Bodies accepted by the control endpoints; never an actor, command or path. */
 export type ControlRequest =
   | { action: "start"; client_action_id: string }

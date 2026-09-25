@@ -362,6 +362,7 @@ function App({ user, onSignOut }: AppProps) {
                       config={config}
                       user={user}
                       messages={messages}
+                      events={events}
                       onSubmitted={() => scheduleRefresh(detail.id)}
                     />
                   )}
