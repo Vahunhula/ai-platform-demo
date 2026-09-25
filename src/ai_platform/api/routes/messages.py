@@ -16,7 +16,13 @@ def list_messages(
     conversation: ConversationDependency,
     presenter: PresenterDependency,
 ) -> list[MessageResponse]:
-    return [presenter.message(entry) for entry in conversation.list_messages(task_id)]
+    """Return the full Chat projection: conversation, phase output, and gate outcomes.
+
+    Named ``/messages`` for URL compatibility; the response is the browser's
+    Chat timeline, not only HUMAN_MESSAGE/AGENT_MESSAGE events.
+    """
+
+    return [presenter.chat_item(item) for item in conversation.list_chat_items(task_id)]
 
 
 @router.post(

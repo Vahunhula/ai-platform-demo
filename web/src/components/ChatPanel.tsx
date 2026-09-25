@@ -37,6 +37,99 @@ interface Props {
   onSubmitted: () => void;
 }
 
+const STATUS_PILL_LABEL: Record<string, string> = {
+  PASS: "Pass",
+  FAIL: "Fail",
+  NEEDS_HUMAN: "Needs human",
+};
+
+/** One Chat-timeline entry, shaped by the backend-owned ``type`` discriminator. */
+function ChatEntry({ message, own }: { message: ConversationMessage; own: boolean }) {
+  const heading = (
+    <div className="event-heading">
+      <strong title={message.actor_id}>
+        {message.actor_display_name}
+        {message.role === "agent" && message.type !== "phase_result" && (
+          <span className="muted"> (agent)</span>
+        )}
+      </strong>
+      <time>
+        #{message.sequence_id} · {formatTime(message.timestamp)}
+      </time>
+    </div>
+  );
+
+  if (message.type === "platform_activity") {
+    return (
+      <div className="chat-activity" key={message.id}>
+        <span>{message.content}</span>
+        <time>{formatTime(message.timestamp)}</time>
+      </div>
+    );
+  }
+
+  if (message.type === "phase_result") {
+    return (
+      <article className="message phase-result">
+        <div className="event-heading">
+          <strong>{message.title}</strong>
+          <time>
+            #{message.sequence_id} · {formatTime(message.timestamp)}
+          </time>
+        </div>
+        <p className="phase-result-body">{message.content}</p>
+        {(message.artifact_version || message.concrete_model) && (
+          <div className="phase-result-meta">
+            {message.artifact_version && <span>v{message.artifact_version}</span>}
+            {message.concrete_model && <span>{message.logical_model ?? message.concrete_model}</span>}
+          </div>
+        )}
+      </article>
+    );
+  }
+
+  if (message.type === "human_input_required") {
+    return (
+      <article className="message needs-input">
+        <div className="event-heading">
+          <strong>{message.title}</strong>
+          <time>
+            #{message.sequence_id} · {formatTime(message.timestamp)}
+          </time>
+        </div>
+        <p className="phase-result-body">{message.content}</p>
+        {message.blocking_checks && message.blocking_checks.length > 0 && (
+          <ul className="blocking-checks">
+            {message.blocking_checks.map((check) => (
+              <li key={check.key}>
+                <span className={`status-pill status-${check.status.toLowerCase()}`}>
+                  {STATUS_PILL_LABEL[check.status] ?? check.status}
+                </span>
+                {check.label}
+              </li>
+            ))}
+          </ul>
+        )}
+        <span className="chip chip-warn">Needs your input</span>
+      </article>
+    );
+  }
+
+  // human_message, agent_message, command_result
+  return (
+    <article className={`message ${message.role} ${own ? "own" : ""}`}>
+      {heading}
+      <p>{message.content}</p>
+      {message.status && message.status !== "COMPLETED" && (
+        <span className={`delivery delivery-${message.status.toLowerCase()}`}>
+          {STATUS_LABEL[message.status]}
+          {message.error && `: ${message.error}`}
+        </span>
+      )}
+    </article>
+  );
+}
+
 export function ChatPanel({ detail, config, user, messages, events, onSubmitted }: Props) {
   const [draft, setDraft] = useState("");
   const [pending, setPending] = useState<PendingMessage[]>([]);
@@ -112,7 +205,6 @@ export function ChatPanel({ detail, config, user, messages, events, onSubmitted 
     : commands.filter((command) => command.name.toLowerCase().startsWith(commandPrefix));
   const showCommandMenu =
     !menuDismissed && isCommand && !draft.trimStart().includes(" ");
-  const commandEvents = events.filter((event) => event.event_type.startsWith("COMMAND_"));
 
   async function send(text: string, clientMessageId: string) {
     setComposerError(null);
@@ -223,48 +315,12 @@ export function ChatPanel({ detail, config, user, messages, events, onSubmitted 
         }}
       >
         {messages === null && <div className="empty-state">Loading conversation…</div>}
-        {messages?.length === 0 && pending.length === 0 && commandEvents.length === 0 && (
+        {messages?.length === 0 && pending.length === 0 && (
           <div className="empty-state">No messages in this task's conversation yet.</div>
         )}
         {messages?.map((message) => (
-          <article
-            className={`message ${message.role} ${message.actor_id === user.username ? "own" : ""}`}
-            key={message.id}
-          >
-            <div className="event-heading">
-              <strong title={message.actor_id}>
-                {message.actor_display_name}
-                {message.role === "agent" && <span className="muted"> (agent)</span>}
-              </strong>
-              <time>
-                #{message.sequence_id} · {formatTime(message.timestamp)}
-              </time>
-            </div>
-            <p>{message.content}</p>
-            {message.status && message.status !== "COMPLETED" && (
-              <span className={`delivery delivery-${message.status.toLowerCase()}`}>
-                {STATUS_LABEL[message.status]}
-                {message.error && `: ${message.error}`}
-              </span>
-            )}
-          </article>
+          <ChatEntry message={message} own={message.actor_id === user.username} key={message.id} />
         ))}
-        {commandEvents.map((event) => {
-          const command = String(event.metadata.command ?? "/command");
-          const claude = event.metadata.namespace === "claude";
-          const args = String(event.metadata.arguments ?? "");
-          const result = String(event.metadata.command_result ?? "");
-          const invoked = event.event_type === "COMMAND_INVOKED";
-          return (
-            <article className={`message command ${invoked ? "human" : "platform"}`} key={event.sequence_id}>
-              <div className="event-heading">
-                <strong>{invoked ? event.actor_display_name : claude ? "Claude command" : "Platform"}</strong>
-                <time>#{event.sequence_id} · {formatTime(event.timestamp)}</time>
-              </div>
-              <p>{invoked ? `${command}${args ? ` ${args}` : ""}` : result || event.event_type}</p>
-            </article>
-          );
-        })}
         {pending.map((item) => (
           <article className="message human own pending" key={item.clientMessageId}>
             <div className="event-heading">

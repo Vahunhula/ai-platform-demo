@@ -18,6 +18,7 @@ from typing import Any
 
 from ai_platform.api.schemas import (
     ActionState,
+    BlockingCheckResponse,
     EventResponse,
     MessageResponse,
     MessagingState,
@@ -30,8 +31,8 @@ from ai_platform.api.schemas import (
 from ai_platform.auth import AuthenticatedUser
 from ai_platform.config import Settings
 from ai_platform.controls import READ_ONLY, ActionAvailability, ControlAction
-from ai_platform.conversation import ConversationEntry, ConversationService
-from ai_platform.events import Event, EventType
+from ai_platform.conversation import ChatItem, ConversationService
+from ai_platform.events import ActorType, Event, EventType
 from ai_platform.models import (
     ExecutionKind,
     MessageStatus,
@@ -41,6 +42,85 @@ from ai_platform.models import (
 )
 from ai_platform.removal import RemovalAvailability
 from ai_platform.sessions import TaskSession
+from ai_platform.workflow import (
+    ArtifactKind,
+    ChecklistEvaluation,
+    ChecklistStatus,
+    WorkflowArtifact,
+    WorkflowPhase,
+)
+
+_PHASE_DISPLAY = {
+    WorkflowPhase.BRAINSTORM: "Brainstorm",
+    WorkflowPhase.PLAN: "Plan",
+    WorkflowPhase.IMPLEMENTATION: "Implementation",
+    WorkflowPhase.REVIEW: "Review",
+    WorkflowPhase.HUMAN_REVIEW: "Human Review",
+}
+
+
+def _phase_label(phase: WorkflowPhase | None) -> str:
+    if phase is None:
+        return ""
+    return _PHASE_DISPLAY.get(phase, phase.value.replace("_", " ").title())
+
+
+def _bulleted(label: str, values: list[object]) -> str:
+    if not values:
+        return ""
+    body = "\n".join(f"- {value}" for value in values)
+    return f"\n\n{label}\n{body}"
+
+
+def _render_artifact_body(kind: ArtifactKind, payload: dict[str, Any]) -> str:
+    """Render one workflow artifact payload as readable Chat text (never raw JSON)."""
+
+    if kind is ArtifactKind.BRAINSTORM_SUMMARY:
+        return (
+            str(payload.get("summary", ""))
+            + _bulleted("Assumptions", payload.get("assumptions", []))
+            + _bulleted("Options", payload.get("options", []))
+            + _bulleted("Open questions", payload.get("questions", []))
+        )
+    if kind is ArtifactKind.PLAN:
+        return (
+            str(payload.get("summary", ""))
+            + _bulleted("Files likely affected", payload.get("files", []))
+            + _bulleted("Steps", payload.get("steps", []))
+            + _bulleted("Validation", payload.get("tests", []))
+            + _bulleted("Risks", payload.get("risks", []))
+            + _bulleted("Open questions", payload.get("open_questions", []))
+        )
+    if kind is ArtifactKind.IMPLEMENTATION_SUMMARY:
+        return (
+            str(payload.get("summary", ""))
+            + _bulleted("Changed", payload.get("files_changed", []))
+            + _bulleted("Verification", payload.get("tests_run", []))
+            + _bulleted("Known issues", payload.get("known_issues", []))
+        )
+    if kind is ArtifactKind.REVIEW_REPORT:
+        assessments = [
+            f"Requirements: {payload.get('requirements_assessment', '')}",
+            f"Tests: {payload.get('test_assessment', '')}",
+            f"Conventions: {payload.get('convention_assessment', '')}",
+        ]
+        return (
+            str(payload.get("summary", ""))
+            + _bulleted("Critical findings", payload.get("critical_findings", []))
+            + _bulleted("Major findings", payload.get("major_findings", []))
+            + _bulleted("Minor findings", payload.get("minor_findings", []))
+            + _bulleted("Assessment", assessments)
+        )
+    if kind is ArtifactKind.HUMAN_REVIEW_DECISION:
+        text = f"Decision: {payload.get('decision', '')}"
+        feedback = payload.get("feedback")
+        if feedback:
+            text += f"\n\n{feedback}"
+        target = payload.get("target_phase")
+        if target:
+            text += f"\n\nNext phase: {str(target).replace('_', ' ').title()}"
+        return text
+    return str(payload)
 
 _COMMON_PUBLIC_METADATA = {
     "attempt",
@@ -237,12 +317,26 @@ class Presenter:
             metadata=self.public_metadata(event),
         )
 
-    def message(self, entry: ConversationEntry) -> MessageResponse:
-        event, delivery = entry.event, entry.delivery
-        is_human = event.event_type is EventType.HUMAN_MESSAGE
+    def chat_item(self, item: ChatItem) -> MessageResponse:
+        """Build one public Chat-timeline entry from its durable ``ChatItem``."""
+
+        builders = {
+            "human_message": self._conversation_message,
+            "agent_message": self._conversation_message,
+            "phase_result": self._phase_result,
+            "human_input_required": self._human_input_required,
+            "platform_activity": self._platform_activity,
+            "command_result": self._command_result,
+        }
+        return builders[item.kind](item)
+
+    def _conversation_message(self, item: ChatItem) -> MessageResponse:
+        event, delivery = item.event, item.delivery
+        is_human = item.kind == "human_message"
         return MessageResponse(
             id=delivery.message_id if delivery else event.id,
             task_id=event.task_id,
+            type=item.kind,
             role="human" if is_human else "agent",
             actor_id=event.actor_id,
             actor_display_name=self._display_name(event),
@@ -254,6 +348,204 @@ class Presenter:
             error=self.redactor.text(delivery.error) if delivery and delivery.error else None,
             client_message_id=delivery.client_message_id if delivery else None,
             channel=str(event.metadata["channel"]) if "channel" in event.metadata else None,
+        )
+
+    def _artifact_author(self, artifact: WorkflowArtifact) -> str:
+        if artifact.created_by_type is ActorType.AGENT:
+            return "Claude"
+        if monotonic() - self._names_loaded_at > 5:
+            self._names = self._load_names()
+            self._names_loaded_at = monotonic()
+        return self._names.get(artifact.created_by, artifact.created_by)
+
+    def _phase_result(self, item: ChatItem) -> MessageResponse:
+        event, artifact = item.event, item.artifact
+        phase_value = event.metadata.get("phase")
+        phase = (
+            WorkflowPhase(phase_value) if phase_value else (artifact.phase if artifact else None)
+        )
+        if artifact is None:
+            # Defensive only: events are append-only, so a referenced artifact
+            # should always resolve; this guards a legacy/corrupted history.
+            return MessageResponse(
+                id=event.id,
+                task_id=event.task_id,
+                type="phase_result",
+                role="agent",
+                actor_id=event.actor_id,
+                actor_display_name="Claude",
+                title=f"Claude · {_phase_label(phase)}",
+                content="This phase's output is no longer available.",
+                timestamp=event.timestamp,
+                sequence_id=event.sequence_id or 0,
+                turn_id=event.metadata.get("execution_id"),
+                workflow_phase=phase,
+                status=None,
+                error=None,
+                client_message_id=None,
+                channel=None,
+            )
+        author = self._artifact_author(artifact)
+        return MessageResponse(
+            id=event.id,
+            task_id=event.task_id,
+            type="phase_result",
+            role="agent" if artifact.created_by_type is ActorType.AGENT else "human",
+            actor_id=artifact.created_by,
+            actor_display_name=author,
+            title=f"{author} · {_phase_label(artifact.phase)}",
+            content=self.redactor.text(_render_artifact_body(artifact.kind, artifact.payload)),
+            timestamp=event.timestamp,
+            sequence_id=event.sequence_id or 0,
+            turn_id=event.metadata.get("execution_id"),
+            workflow_phase=artifact.phase,
+            artifact_kind=artifact.kind,
+            artifact_version=artifact.version,
+            logical_model=artifact.logical_model,
+            concrete_model=artifact.concrete_model,
+            status=None,
+            error=None,
+            client_message_id=None,
+            channel=None,
+        )
+
+    def _blocking_checks(
+        self, checklist: ChecklistEvaluation | None, keys: list[str]
+    ) -> list[BlockingCheckResponse]:
+        by_key = {item.key: item for item in checklist.items} if checklist else {}
+        checks = []
+        for key in keys:
+            found = by_key.get(key)
+            if found is not None:
+                checks.append(
+                    BlockingCheckResponse(
+                        key=found.key,
+                        label=found.label,
+                        status=found.status.value,
+                        evidence=self.redactor.text(found.evidence),
+                    )
+                )
+            else:
+                checks.append(
+                    BlockingCheckResponse(
+                        key=key,
+                        label=key.replace("_", " ").capitalize(),
+                        status=ChecklistStatus.NEEDS_HUMAN.value,
+                        evidence="",
+                    )
+                )
+        return checks
+
+    def _human_input_required(self, item: ChatItem) -> MessageResponse:
+        event = item.event
+        metadata = event.metadata
+        phase_value = metadata.get("phase")
+        phase = WorkflowPhase(phase_value) if phase_value else None
+        phase_label = _phase_label(phase)
+        score = metadata.get("score")
+        keys = [*metadata.get("blocking_failures", []), *metadata.get("blocking_needs_human", [])]
+        checks = self._blocking_checks(item.checklist, [str(key) for key in keys])
+        lines = [f"The {phase_label} phase cannot proceed automatically."]
+        if checks:
+            lines.append("")
+            lines.append("Questions:")
+            for index, check in enumerate(checks, start=1):
+                evidence = f" — {check.evidence}" if check.evidence else ""
+                lines.append(f"{index}. {check.label}{evidence}")
+        if score is not None:
+            lines.append("")
+            lines.append(f"Readiness: {float(score):.0f}%")
+        return MessageResponse(
+            id=event.id,
+            task_id=event.task_id,
+            type="human_input_required",
+            role="platform",
+            actor_id=event.actor_id,
+            actor_display_name="Platform",
+            title=f"Needs your input · {phase_label}",
+            content="\n".join(lines),
+            timestamp=event.timestamp,
+            sequence_id=event.sequence_id or 0,
+            turn_id=metadata.get("execution_id"),
+            workflow_phase=phase,
+            readiness_score=float(score) if score is not None else None,
+            requires_human_input=True,
+            blocking_checks=checks,
+            status=None,
+            error=None,
+            client_message_id=None,
+            channel=None,
+        )
+
+    def _platform_activity(self, item: ChatItem) -> MessageResponse:
+        event = item.event
+        metadata = event.metadata
+        phase: WorkflowPhase | None = None
+        if event.event_type is EventType.WORKFLOW_PHASE_STARTED:
+            phase = WorkflowPhase(metadata["phase"])
+            content = f"{_phase_label(phase)} phase started"
+        else:  # WORKFLOW_PHASE_CHANGED
+            from_phase = WorkflowPhase(metadata["from_phase"])
+            to_phase = WorkflowPhase(metadata["to_phase"])
+            phase = to_phase
+            from_label, to_label = _phase_label(from_phase), _phase_label(to_phase)
+            if metadata.get("transition_mode") == "AUTOMATIC":
+                if item.checklist is not None:
+                    score = item.checklist.readiness.score
+                    content = (
+                        f"{from_label} passed readiness gate · {score:.0f}%\nMoving to {to_label}…"
+                    )
+                else:
+                    content = f"{from_label} passed its readiness gate.\nMoving to {to_label}…"
+            else:
+                content = f"Moved from {from_label} to {to_label}."
+        return MessageResponse(
+            id=event.id,
+            task_id=event.task_id,
+            type="platform_activity",
+            role="platform",
+            actor_id=event.actor_id,
+            actor_display_name="Platform",
+            content=content,
+            timestamp=event.timestamp,
+            sequence_id=event.sequence_id or 0,
+            turn_id=metadata.get("execution_id"),
+            workflow_phase=phase,
+            status=None,
+            error=None,
+            client_message_id=None,
+            channel=None,
+        )
+
+    def _command_result(self, item: ChatItem) -> MessageResponse:
+        event = item.event
+        metadata = event.metadata
+        command = str(metadata.get("command", "/command"))
+        invoked = event.event_type is EventType.COMMAND_INVOKED
+        if invoked:
+            arguments = str(metadata.get("arguments", ""))
+            content = f"{command}{' ' + arguments if arguments else ''}"
+            role, actor_display_name = "human", self._display_name(event)
+        else:
+            content = str(metadata.get("command_result") or event.event_type.value)
+            claude_namespace = metadata.get("namespace") == "claude"
+            role = "platform"
+            actor_display_name = "Claude command" if claude_namespace else "Platform"
+        return MessageResponse(
+            id=event.id,
+            task_id=event.task_id,
+            type="command_result",
+            role=role,
+            actor_id=event.actor_id,
+            actor_display_name=actor_display_name,
+            content=self.redactor.text(content),
+            timestamp=event.timestamp,
+            sequence_id=event.sequence_id or 0,
+            turn_id=metadata.get("execution_id"),
+            status=None,
+            error=None,
+            client_message_id=None,
+            channel=None,
         )
 
     @staticmethod
@@ -311,6 +603,8 @@ class Presenter:
             disposition=record.disposition,
             can_remove=removal.allowed,
             remove_disabled_reason=removal.reason,
+            repository_id=record.repository_id,
+            base_branch=record.base_branch,
         )
 
     def _verification_result(self, events: list[Event]) -> VerificationResultResponse | None:

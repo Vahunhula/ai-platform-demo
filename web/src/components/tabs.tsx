@@ -1,7 +1,8 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
-import type { PlatformEvent } from "../types/api";
-import { formatCommand, formatTime, summarizeEvent } from "./format";
+import { api } from "../api/client";
+import type { ChecklistEvaluation, ConversationMessage, PlatformEvent, TaskDetail } from "../types/api";
+import { formatCommand, formatDateTime, formatTime, summarizeEvent } from "./format";
 
 export function DiffTab({
   diff,
@@ -112,17 +113,48 @@ export function TestsTab({ events }: { events: PlatformEvent[] }) {
   );
 }
 
+const ACTIVITY_PAGE_SIZE = 40;
+
 export function TraceTab({ events }: { events: PlatformEvent[] }) {
+  const [newestFirst, setNewestFirst] = useState(true);
+  const [visibleCount, setVisibleCount] = useState(ACTIVITY_PAGE_SIZE);
+
+  // A newly loaded task, or a freshly opened stream, starts back at the latest page.
+  useEffect(() => setVisibleCount(ACTIVITY_PAGE_SIZE), [events.length === 0]);
+
   if (!events.length) return <Empty text="No events recorded yet." />;
+  // Sequence numbers are the durable, monotonically increasing source of truth;
+  // this only reorders how the list is presented, never the events themselves.
+  const ordered = newestFirst ? [...events].reverse() : events;
+  const visible = ordered.slice(0, visibleCount);
+  const hasMore = visibleCount < ordered.length;
   return (
     <div className="event-list">
-      <p className="tab-note">
-        {events.length} public platform events in sequence order. Model reasoning is never
-        recorded here.
-      </p>
-      {events.map((event) => (
+      <div className="tab-note activity-controls">
+        <span>
+          {events.length} public platform events. Model reasoning is never recorded here.
+        </span>
+        <button
+          type="button"
+          className="link-button"
+          onClick={() => setNewestFirst((value) => !value)}
+        >
+          {newestFirst ? "Showing newest first" : "Showing oldest first"} · switch
+        </button>
+      </div>
+      {visible.map((event) => (
         <TraceEvent event={event} key={event.sequence_id} />
       ))}
+      {hasMore && (
+        <button
+          type="button"
+          className="link-button load-more"
+          onClick={() => setVisibleCount((count) => count + ACTIVITY_PAGE_SIZE)}
+        >
+          Load {Math.min(ACTIVITY_PAGE_SIZE, ordered.length - visibleCount)}{" "}
+          {newestFirst ? "older" : "newer"} events
+        </button>
+      )}
     </div>
   );
 }
@@ -151,6 +183,162 @@ function TraceEvent({ event }: { event: PlatformEvent }) {
         {open && <pre>{JSON.stringify(event.metadata, null, 2)}</pre>}
       </div>
     </article>
+  );
+}
+
+const STATUS_LABEL: Record<string, string> = { PASS: "Pass", FAIL: "Fail", NEEDS_HUMAN: "Needs human" };
+
+function ReadinessChecklist({ evaluation }: { evaluation: ChecklistEvaluation | null }) {
+  if (!evaluation) return <p className="muted">No readiness gate has run for this task yet.</p>;
+  return (
+    <div className="readiness-checklist">
+      <div className="readiness-score">
+        <strong>{evaluation.readiness.score.toFixed(0)}%</strong>
+        <span className="muted">
+          {evaluation.readiness.eligible_for_auto_progression
+            ? "eligible to auto-progress (≥ 98%, no blockers)"
+            : "blocked from auto-progressing"}
+        </span>
+      </div>
+      <ul>
+        {evaluation.items.map((item) => (
+          <li key={item.key}>
+            <span className={`status-pill status-${item.status.toLowerCase()}`}>
+              {STATUS_LABEL[item.status] ?? item.status}
+            </span>
+            <span>{item.label}</span>
+            {item.blocking && <span className="muted blocking-flag">blocking</span>}
+            <span className="muted weight">weight {item.weight}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+/** Latest phase_result Chat item per artifact kind, i.e. the current artifacts. */
+function latestArtifacts(messages: ConversationMessage[] | null): ConversationMessage[] {
+  if (!messages) return [];
+  const byKind = new Map<string, ConversationMessage>();
+  for (const message of messages) {
+    if (message.type !== "phase_result" || !message.artifact_kind) continue;
+    const existing = byKind.get(message.artifact_kind);
+    if (!existing || message.sequence_id > existing.sequence_id) byKind.set(message.artifact_kind, message);
+  }
+  return [...byKind.values()].sort((a, b) => a.sequence_id - b.sequence_id);
+}
+
+export function SummaryTab({
+  detail,
+  messages,
+  diff,
+}: {
+  detail: TaskDetail;
+  messages: ConversationMessage[] | null;
+  diff: string | null;
+}) {
+  const [evaluation, setEvaluation] = useState<ChecklistEvaluation | null | undefined>(undefined);
+
+  useEffect(() => {
+    setEvaluation(undefined);
+    const controller = new AbortController();
+    api
+      .getChecklists(detail.id, controller.signal)
+      .then((evaluations) => {
+        const forPhase = [...evaluations].reverse().find((item) => item.phase === detail.workflow_phase);
+        setEvaluation(forPhase ?? evaluations.at(-1) ?? null);
+      })
+      .catch(() => setEvaluation(null));
+    return () => controller.abort();
+  }, [detail.id, detail.workflow_phase]);
+
+  const pendingQuestion = [...(messages ?? [])].reverse().find((m) => m.type === "human_input_required");
+  const changedFileCount = diff ? new Set(diff.match(/^\+\+\+ .+$/gm) ?? []).size : null;
+
+  return (
+    <div className="summary-tab">
+      <div className="facts">
+        <SummaryFact label="Task" value={`${detail.id} · ${detail.title}`} />
+        <SummaryFact label="Repository" value={detail.repository_id ?? "Not set"} />
+        <SummaryFact label="Base branch" value={detail.base_branch ?? "Not set"} />
+        <SummaryFact label="Lifecycle" value={detail.status} />
+        <SummaryFact label="Workflow phase" value={detail.workflow_phase.replaceAll("_", " ")} />
+        <SummaryFact label="Disposition" value={detail.disposition ?? "None"} />
+        <SummaryFact
+          label="Model"
+          value={[detail.model_tier, detail.model_name].filter(Boolean).join(" / ") || "Not selected"}
+        />
+        <SummaryFact label="Verification" value={detail.verification_status} />
+        <SummaryFact
+          label="Changed files"
+          value={changedFileCount === null ? "Unknown" : String(changedFileCount)}
+        />
+        <SummaryFact label="Pending instructions" value={String(detail.queued_messages)} />
+      </div>
+
+      <section>
+        <h3>Readiness</h3>
+        {evaluation === undefined ? <p className="muted">Loading…</p> : <ReadinessChecklist evaluation={evaluation} />}
+      </section>
+
+      {detail.status === "WAITING_FOR_HUMAN" && (
+        <section>
+          <h3>Pending question</h3>
+          {pendingQuestion ? (
+            <p className="phase-result-body">{pendingQuestion.content}</p>
+          ) : (
+            <p className="muted">This task is waiting for human input.</p>
+          )}
+        </section>
+      )}
+
+      <section>
+        <h3>Latest artifacts</h3>
+        {latestArtifacts(messages).length === 0 ? (
+          <p className="muted">No phase output yet.</p>
+        ) : (
+          <ul className="artifact-list">
+            {latestArtifacts(messages).map((artifact) => (
+              <li key={artifact.id}>
+                <strong>{artifact.title}</strong>{" "}
+                <span className="muted">v{artifact.artifact_version}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+    </div>
+  );
+}
+
+function SummaryFact({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="fact">
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
+  );
+}
+
+export function WorkspaceTab({ detail }: { detail: TaskDetail }) {
+  return (
+    <div className="summary-tab">
+      <div className="facts">
+        <SummaryFact label="Repository" value={detail.repository_id ?? "Not set"} />
+        <SummaryFact label="Base branch" value={detail.base_branch ?? "Not set"} />
+        <SummaryFact label="Workspace" value={detail.workspace_id ?? "Not created"} />
+        <SummaryFact label="Executor state" value={detail.agent_working ? "Running" : "Idle"} />
+        <SummaryFact label="Active writer" value={detail.writer ?? "None"} />
+        <SummaryFact label="Attempt" value={String(detail.current_attempt)} />
+        <SummaryFact label="Verification" value={detail.verification_status} />
+      </div>
+      <p className="muted timestamps">
+        Created {formatDateTime(detail.created_at)}
+        <br />
+        Updated {formatDateTime(detail.updated_at)}
+      </p>
+      {!detail.workspace_id && <Empty text="No workspace has been created for this task yet." />}
+    </div>
   );
 }
 

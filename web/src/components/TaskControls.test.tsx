@@ -51,6 +51,8 @@ const detail = {
   disposition: "CONFIRMED",
   can_remove: true,
   remove_disabled_reason: null,
+  repository_id: null,
+  base_branch: null,
 } as TaskDetail;
 
 afterEach(() => {

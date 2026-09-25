@@ -1,5 +1,7 @@
 """Read-only task, history, and workspace-diff endpoints."""
 
+from typing import Literal
+
 from fastapi import APIRouter, Response
 
 from ai_platform.api.dependencies import (
@@ -132,8 +134,17 @@ def get_events(
     task_id: str,
     context: ContextDependency,
     presenter: PresenterDependency,
+    order: Literal["asc", "desc"] = "asc",
 ) -> list[EventResponse]:
-    return [presenter.event(event) for event in context.sessions.get_events(task_id)]
+    """Return the durable event log. ``order`` is presentation-only.
+
+    Canonical storage and SSE delivery are always chronological; ``desc``
+    only reverses the list this endpoint returns, for an Activity view that
+    defaults to newest-first without touching sequence-number semantics.
+    """
+
+    events = [presenter.event(event) for event in context.sessions.get_events(task_id)]
+    return list(reversed(events)) if order == "desc" else events
 
 
 @router.get("/{task_id}/diff", response_model=DiffResponse)

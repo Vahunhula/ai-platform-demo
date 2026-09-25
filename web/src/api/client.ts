@@ -21,6 +21,8 @@ import type {
   CommandMetadata,
   CommandResult,
   ClaudeCommandMetadata,
+  ChecklistEvaluation,
+  WorkflowArtifactResponse,
 } from "../types/api";
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/$/, "");
@@ -113,6 +115,10 @@ export const api = {
     request<PlatformEvent[]>(`${task(taskId)}/events`, { signal }),
   getDiff: (taskId: string, signal?: AbortSignal) =>
     request<DiffResponse>(`${task(taskId)}/diff`, { signal }),
+  getChecklists: (taskId: string, signal?: AbortSignal) =>
+    request<ChecklistEvaluation[]>(`${task(taskId)}/checklists`, { signal }),
+  getArtifacts: (taskId: string, signal?: AbortSignal) =>
+    request<WorkflowArtifactResponse[]>(`${task(taskId)}/artifacts?current=true`, { signal }),
   getMessages: (taskId: string, signal?: AbortSignal) =>
     request<ConversationMessage[]>(`${task(taskId)}/messages`, { signal }),
   postMessage: (taskId: string, body: PostMessageRequest) =>

@@ -9,7 +9,8 @@ import { ModelRoutingPanel } from "./components/ModelRoutingPanel";
 import { TaskControls } from "./components/TaskControls";
 import { TaskSidebar } from "./components/TaskSidebar";
 import { NewTaskDialog } from "./components/NewTaskDialog";
-import { DiffTab, TestsTab, TraceTab } from "./components/tabs";
+import { DiffTab, SummaryTab, TestsTab, TraceTab, WorkspaceTab } from "./components/tabs";
+import { WorkflowProgress } from "./components/WorkflowProgress";
 import type {
   ConfigResponse,
   ConversationMessage,
@@ -20,9 +21,9 @@ import type {
   CreateTaskResponse,
 } from "./types/api";
 
-type Tab = "Chat" | "Diff" | "Tests" | "Trace";
+type Tab = "Chat" | "Changes" | "Tests" | "Activity" | "Summary" | "Workspace";
 
-const tabs: Tab[] = ["Chat", "Diff", "Tests", "Trace"];
+const tabs: Tab[] = ["Chat", "Changes", "Tests", "Activity", "Summary", "Workspace"];
 // Events after which the workspace diff may have changed.
 const DIFF_EVENTS = new Set([
   "FILE_CHANGED",
@@ -186,7 +187,7 @@ function App({ user, onSignOut }: AppProps) {
   });
 
   useEffect(() => {
-    if (tab !== "Diff" || !detail || diff !== null) return;
+    if ((tab !== "Changes" && tab !== "Summary") || !detail || diff !== null) return;
     const controller = new AbortController();
     api
       .getDiff(detail.id, controller.signal)
@@ -356,6 +357,7 @@ function App({ user, onSignOut }: AppProps) {
                 />
               </section>
 
+              <WorkflowProgress detail={detail} events={events} />
               <TaskOverview detail={detail} />
               <ModelRoutingPanel taskId={detail.id} user={user} />
 
@@ -384,11 +386,13 @@ function App({ user, onSignOut }: AppProps) {
                       onSubmitted={() => scheduleRefresh(detail.id)}
                     />
                   )}
-                  {tab === "Diff" && (
+                  {tab === "Changes" && (
                     <DiffTab diff={diff} workspaceExists={detail.workspace_id !== null} />
                   )}
                   {tab === "Tests" && <TestsTab events={events} />}
-                  {tab === "Trace" && <TraceTab events={events} />}
+                  {tab === "Activity" && <TraceTab events={events} />}
+                  {tab === "Summary" && <SummaryTab detail={detail} messages={messages} diff={diff} />}
+                  {tab === "Workspace" && <WorkspaceTab detail={detail} />}
                 </div>
               </section>
             </>

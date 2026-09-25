@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
   CommandMetadata,
   ConfigResponse,
+  ConversationMessage,
   CurrentUser,
   TaskDetail,
 } from "../types/api";
@@ -75,6 +76,8 @@ const detail = {
   disposition: null,
   can_remove: false,
   remove_disabled_reason: "Only terminal tasks can be removed.",
+  repository_id: null,
+  base_branch: null,
 } as TaskDetail;
 
 const command = (
@@ -92,17 +95,47 @@ const command = (
   mutating: name !== "/status",
 });
 
-function show() {
+function show(messages: ConversationMessage[] = []) {
   return render(
     <ChatPanel
       detail={detail}
       config={config}
       user={user}
-      messages={[]}
+      messages={messages}
       events={[]}
       onSubmitted={vi.fn()}
     />,
   );
+}
+
+const baseItem: ConversationMessage = {
+  id: "item-1",
+  task_id: "DEMO-1",
+  type: "platform_activity",
+  role: "platform",
+  actor_id: "task-graph",
+  actor_display_name: "Platform",
+  title: null,
+  content: "",
+  timestamp: "2026-01-01T00:00:00Z",
+  sequence_id: 1,
+  turn_id: null,
+  workflow_phase: null,
+  artifact_kind: null,
+  artifact_version: null,
+  readiness_score: null,
+  requires_human_input: false,
+  blocking_checks: null,
+  logical_model: null,
+  concrete_model: null,
+  status: null,
+  error: null,
+  client_message_id: null,
+  channel: null,
+};
+
+function chatItem(overrides: Partial<ConversationMessage>): ConversationMessage {
+  return { ...baseItem, ...overrides };
 }
 
 afterEach(() => {
@@ -201,5 +234,90 @@ describe("platform command composer", () => {
     fireEvent.change(composer, { target: { value: "Please inspect claude/config.py" } });
     fireEvent.keyDown(composer, { key: "Enter" });
     await waitFor(() => expect(mocks.postMessage).toHaveBeenCalledOnce());
+  });
+});
+
+describe("Chat as a projection of workflow state (Phase 6)", () => {
+  it("shows a phase's actual output directly in Chat, not just a phase-changed line", async () => {
+    mocks.getClaudeCommands.mockResolvedValue([]);
+    mocks.getCommands.mockResolvedValue([]);
+    show([
+      chatItem({
+        id: "plan-1",
+        type: "phase_result",
+        role: "agent",
+        actor_id: "agent:plan",
+        actor_display_name: "Claude",
+        title: "Claude · Plan",
+        content: "Implement the described change.\n\nSteps\n- Make the change.\n- Run the tests.",
+        sequence_id: 5,
+        workflow_phase: "PLAN",
+        artifact_kind: "PLAN",
+        artifact_version: 1,
+        logical_model: "CLAUDE_SONNET",
+      }),
+    ]);
+
+    expect(screen.getByText("Claude · Plan")).toBeTruthy();
+    expect(screen.getByText(/Implement the described change\./)).toBeTruthy();
+    expect(screen.getByText(/Run the tests\./)).toBeTruthy();
+    expect(screen.getByText("v1")).toBeTruthy();
+  });
+
+  it("shows a waiting-for-human question and its blocking checks directly in Chat", async () => {
+    mocks.getClaudeCommands.mockResolvedValue([]);
+    mocks.getCommands.mockResolvedValue([]);
+    show([
+      chatItem({
+        id: "needs-input-1",
+        type: "human_input_required",
+        role: "platform",
+        actor_display_name: "Platform",
+        title: "Needs your input · Plan",
+        content: "The Plan phase cannot proceed automatically.\n\nQuestions:\n1. Open questions are resolved",
+        sequence_id: 6,
+        workflow_phase: "PLAN",
+        readiness_score: 82,
+        requires_human_input: true,
+        blocking_checks: [
+          { key: "open_questions_resolved", label: "Open questions are resolved", status: "NEEDS_HUMAN", evidence: "1 open question(s) block implementation" },
+        ],
+      }),
+    ]);
+
+    expect(screen.getByText("Needs your input · Plan")).toBeTruthy();
+    expect(screen.getByText(/cannot proceed automatically/)).toBeTruthy();
+    expect(screen.getByText("Open questions are resolved")).toBeTruthy();
+    expect(screen.getByText("Needs human")).toBeTruthy();
+    expect(screen.getByText("Needs your input")).toBeTruthy();
+  });
+
+  it("renders platform activity (phase started / gate passed) as a narrow status line", async () => {
+    mocks.getClaudeCommands.mockResolvedValue([]);
+    mocks.getCommands.mockResolvedValue([]);
+    show([
+      chatItem({
+        id: "activity-1",
+        type: "platform_activity",
+        content: "Plan phase started",
+        sequence_id: 3,
+      }),
+    ]);
+
+    expect(screen.getByText("Plan phase started")).toBeTruthy();
+  });
+
+  it("renders human, agent, and command_result items in one chronologically ordered list", async () => {
+    mocks.getClaudeCommands.mockResolvedValue([]);
+    mocks.getCommands.mockResolvedValue([]);
+    show([
+      chatItem({ id: "h1", type: "human_message", role: "human", actor_id: "dev", actor_display_name: "Dev", content: "/plan", sequence_id: 1 }),
+      chatItem({ id: "c1", type: "command_result", role: "platform", actor_display_name: "Platform", content: "Workflow moved to PLAN.", sequence_id: 2 }),
+      chatItem({ id: "a1", type: "agent_message", role: "agent", actor_id: "claude", actor_display_name: "Claude", content: "Working on it.", sequence_id: 3 }),
+    ]);
+
+    const log = screen.getByText("Working on it.").closest(".chat-log") as HTMLElement;
+    const texts = [...log.querySelectorAll("article p")].map((node) => node.textContent);
+    expect(texts).toEqual(["/plan", "Workflow moved to PLAN.", "Working on it."]);
   });
 });

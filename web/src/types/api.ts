@@ -127,6 +127,8 @@ export interface TaskDetail extends TaskListItem {
   disposition: "CONFIRMED" | "DEFERRED" | null;
   can_remove: boolean;
   remove_disabled_reason: string | null;
+  repository_id: string | null;
+  base_branch: string | null;
 }
 
 export interface ReadinessSummary {
@@ -182,18 +184,83 @@ export interface DiffResponse {
   diff: string;
 }
 
+export interface ChecklistItemResult {
+  key: string;
+  label: string;
+  weight: number;
+  blocking: boolean;
+  status: "PASS" | "FAIL" | "NEEDS_HUMAN";
+  evidence: string;
+}
+
+export interface ReadinessResult {
+  score: number;
+  blocking_failures: string[];
+  blocking_needs_human: string[];
+  eligible_for_auto_progression: boolean;
+}
+
+export interface ChecklistEvaluation {
+  evaluation_id: string;
+  task_id: string;
+  phase: "BRAINSTORM" | "PLAN" | "IMPLEMENTATION" | "REVIEW" | "HUMAN_REVIEW";
+  evaluation_number: number;
+  created_by: string;
+  created_at: string;
+  items: ChecklistItemResult[];
+  readiness: ReadinessResult;
+}
+
+export interface WorkflowArtifactResponse {
+  artifact_id: string;
+  task_id: string;
+  phase: "BRAINSTORM" | "PLAN" | "IMPLEMENTATION" | "REVIEW" | "HUMAN_REVIEW";
+  kind: string;
+  version: number;
+  payload: Record<string, unknown>;
+  created_by: string;
+  created_at: string;
+  supersedes_artifact_id: string | null;
+}
+
 export type MessageStatus = "QUEUED" | "RUNNING" | "COMPLETED" | "FAILED";
 
+export type ChatItemType =
+  | "human_message"
+  | "agent_message"
+  | "phase_result"
+  | "human_input_required"
+  | "platform_activity"
+  | "command_result";
+
+export interface BlockingCheck {
+  key: string;
+  label: string;
+  status: string;
+  evidence: string;
+}
+
+/** One Chat-timeline item: a conversation message or a workflow projection. */
 export interface ConversationMessage {
   id: string;
   task_id: string;
-  role: "human" | "agent";
+  type: ChatItemType;
+  role: "human" | "agent" | "platform";
   actor_id: string;
   actor_display_name: string;
+  title: string | null;
   content: string;
   timestamp: string;
   sequence_id: number;
   turn_id: string | null;
+  workflow_phase: AgentWorkflowPhase | "HUMAN_REVIEW" | null;
+  artifact_kind: string | null;
+  artifact_version: number | null;
+  readiness_score: number | null;
+  requires_human_input: boolean;
+  blocking_checks: BlockingCheck[] | null;
+  logical_model: string | null;
+  concrete_model: string | null;
   /** Delivery state; only browser-submitted human messages have one. */
   status: MessageStatus | null;
   error: string | null;

@@ -191,6 +191,9 @@ class TaskDetailResponse(TaskListItem):
     disposition: Literal["CONFIRMED", "DEFERRED"] | None
     can_remove: bool
     remove_disabled_reason: str | None
+    # Safe workspace identity for the Workspace tab; never an absolute host path.
+    repository_id: str | None = None
+    base_branch: str | None = None
 
 
 class ModelCatalogResponse(BaseModel):
@@ -328,19 +331,55 @@ class ChecklistEvaluationResponse(BaseModel):
 
 MessageStatusName = Literal["QUEUED", "RUNNING", "COMPLETED", "FAILED"]
 
+ChatItemTypeName = Literal[
+    "human_message",
+    "agent_message",
+    "phase_result",
+    "human_input_required",
+    "platform_activity",
+    "command_result",
+]
+
+
+class BlockingCheckResponse(BaseModel):
+    """One blocking/needs-human checklist item explaining why a gate did not pass."""
+
+    key: str
+    label: str
+    status: str
+    evidence: str
+
 
 class MessageResponse(BaseModel):
-    """One public conversation message (HUMAN_MESSAGE or AGENT_MESSAGE event)."""
+    """One public Chat-timeline item.
+
+    Chat is a projection over durable domain data: besides plain human/agent
+    conversation messages, this also carries phase output, waiting-for-human
+    questions, phase transitions, and command results, so the browser never
+    has to infer any of that from raw Activity events. Only the fields
+    relevant to ``type`` are populated; the rest are ``None``.
+    """
 
     id: str
     task_id: str
-    role: Literal["human", "agent"]
+    type: ChatItemTypeName
+    role: Literal["human", "agent", "platform"]
     actor_id: str
     actor_display_name: str
+    # A short header, e.g. "Claude · Plan" or "Needs your input · Plan".
+    title: str | None = None
     content: str
     timestamp: datetime
     sequence_id: int
     turn_id: str | None
+    workflow_phase: WorkflowPhase | None = None
+    artifact_kind: ArtifactKind | None = None
+    artifact_version: int | None = None
+    readiness_score: float | None = None
+    requires_human_input: bool = False
+    blocking_checks: list[BlockingCheckResponse] | None = None
+    logical_model: str | None = None
+    concrete_model: str | None = None
     # Delivery state; only browser-submitted human messages have one.
     status: MessageStatusName | None
     error: str | None
