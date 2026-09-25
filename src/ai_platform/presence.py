@@ -28,13 +28,20 @@ class PresenceService:
     def heartbeat(self, task_id: str, user: AuthenticatedUser) -> list[AuthenticatedUser]:
         now = datetime.now(UTC)
         with self.storage.transaction(immediate=True) as connection:
-            connection.execute(
+            cursor = connection.execute(
                 """
-                INSERT INTO task_presence (task_id, user_id, last_seen) VALUES (?, ?, ?)
+                INSERT INTO task_presence (task_id, user_id, last_seen)
+                SELECT ?, ?, ?
+                WHERE EXISTS (
+                    SELECT 1 FROM tasks
+                    WHERE task_id = ? AND removal_started_at IS NULL
+                )
                 ON CONFLICT (task_id, user_id) DO UPDATE SET last_seen = excluded.last_seen
                 """,
-                (task_id, user.user_id, now.isoformat()),
+                (task_id, user.user_id, now.isoformat(), task_id),
             )
+            if cursor.rowcount != 1:
+                raise KeyError(task_id)
             connection.execute(
                 "DELETE FROM task_presence WHERE last_seen < ?",
                 ((now - _CLEANUP_AFTER).isoformat(),),

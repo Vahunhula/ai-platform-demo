@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from ai_platform.workspace import LocalWorkspaceProvider, WorkspaceExistsError
+from ai_platform.workspace import LocalWorkspaceProvider, WorkspaceError, WorkspaceExistsError
 
 
 def test_creates_clean_git_workspace_without_modifying_source(tmp_path: Path) -> None:
@@ -43,3 +43,19 @@ def test_rejects_unsafe_task_id(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="Unsafe task ID"):
         provider.get_path("../outside")
+
+
+def test_destroy_refuses_source_repository_and_isolates_sibling_task(tmp_path: Path) -> None:
+    root = tmp_path / "workspaces"
+    source = root / "SOURCE"
+    source.mkdir(parents=True)
+    (source / "keep.txt").write_text("source")
+    sibling = root / "OTHER"
+    sibling.mkdir()
+    (sibling / "keep.txt").write_text("other")
+    provider = LocalWorkspaceProvider(root, source)
+
+    with pytest.raises(WorkspaceError, match="source repository"):
+        provider.destroy("SOURCE")
+    assert (source / "keep.txt").read_text() == "source"
+    assert (sibling / "keep.txt").read_text() == "other"

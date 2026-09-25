@@ -1,11 +1,12 @@
 """Read-only task, history, and workspace-diff endpoints."""
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Response
 
 from ai_platform.api.dependencies import (
     ContextDependency,
     ControlsDependency,
     PresenterDependency,
+    RemovalDependency,
     TaskCreationDependency,
 )
 from ai_platform.api.presenters import queued_count
@@ -23,6 +24,7 @@ from ai_platform.api.schemas import (
     PhaseModelRoutingResponse,
     PhaseTransitionRequest,
     PhaseTransitionResponse,
+    ReadinessSummary,
     ResolvedModelResponse,
     TaskDetailResponse,
     TaskListItem,
@@ -83,11 +85,46 @@ def get_task(
     controls: ControlsDependency,
     presenter: PresenterDependency,
     user: UserDependency,
+    removal: RemovalDependency,
 ) -> TaskDetailResponse:
     session = context.sessions.get_session(task_id)
     queued = queued_count(context.storage.list_queued_messages(session.definition.id))
     actions = controls.availability(session.record, user)
-    return presenter.task_detail(session, user, queued, actions)
+    evaluations = context.storage.list_checklist_evaluations(session.definition.id)
+    latest_readiness = (
+        ReadinessSummary(
+            phase=evaluations[-1].phase,
+            score=evaluations[-1].readiness.score,
+            eligible_for_auto_progression=evaluations[-1].readiness.eligible_for_auto_progression,
+        )
+        if evaluations
+        else None
+    )
+    removal_state = removal.availability(session.record, user)
+    return presenter.task_detail(
+        session,
+        user,
+        queued,
+        actions,
+        latest_readiness=latest_readiness,
+        removal=removal_state,
+    )
+
+
+@router.delete(
+    "/{task_id}",
+    status_code=204,
+    responses={401: {}, 403: {}, 404: {}, 409: {}},
+)
+def remove_task(
+    task_id: str,
+    removal: RemovalDependency,
+    user: DeveloperDependency,
+) -> Response:
+    """Permanently remove one terminal TaskSession and its owned resources."""
+
+    removal.remove(task_id.upper(), user)
+    return Response(status_code=204)
 
 
 @router.get("/{task_id}/events", response_model=list[EventResponse])

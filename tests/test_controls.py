@@ -18,6 +18,7 @@ from ai_platform.events import EventType
 from ai_platform.identity import HumanIdentity
 from ai_platform.models import ExecutionKind, MessageStatus, TaskStatus
 from ai_platform.runner import TaskTurnRunner
+from ai_platform.workflow import WorkflowPhase
 from tests.fakes import FakeAgentExecutor
 from tests.test_messaging import (
     WEB_ACTOR,
@@ -117,7 +118,10 @@ async def test_start_is_async_uses_core_path_and_is_idempotent(harness: Harness)
     started = _events(harness.context, "DEMO-1", EventType.TASK_STARTED)
     assert len(started) == 1 and started[0].actor_id == WEB_ACTOR
     assert started[0].metadata["execution_id"] == body["execution_id"]
-    assert harness.executor.max_active == 1 and len(harness.executor.requests) == 1
+    # One turn, sequential across phases (Implementation then Review): never
+    # concurrent, but more than one call once Implementation's gate passes.
+    assert harness.executor.max_active == 1
+    assert len({r.execution_id for r in harness.executor.requests}) == 1
 
 
 @pytest.mark.anyio
@@ -153,6 +157,16 @@ async def test_start_rejected_outside_ready(harness: Harness) -> None:
 
 @pytest.mark.anyio
 async def test_chat_and_start_race_keeps_one_writer(harness: Harness) -> None:
+    """A message queued while Start is in flight waits for that one turn.
+
+    Phase 3: a clean start flows straight through Review to Human Review, all
+    under the start turn's one writer lock/execution_id (one permit release
+    covers both phases; Review is not gated again). The message queued mid-turn
+    is only picked up once the task rests in Human Review, where it completes
+    without starting a further turn (section 22) -- there is still exactly one
+    writer throughout.
+    """
+
     harness.executor.gated = True
     async with _client(harness.app) as client:
         early_chat = await client.post(
@@ -167,15 +181,14 @@ async def test_chat_and_start_race_keeps_one_writer(harness: Harness) -> None:
             json={"message": "while starting", "client_message_id": "chat-during-1"},
         )
         assert _statuses(harness.context) == [MessageStatus.QUEUED]
-        harness.executor.permits.release()  # finish the start turn
-        follow_up = harness.executor.started.get(timeout=30)
-        harness.executor.permits.release()  # finish the chat turn
+        harness.executor.permits.release()  # finish the start turn (Implementation, then Review)
         _wait_for(lambda: _statuses(harness.context) == [MessageStatus.COMPLETED])
 
     assert early_chat.status_code == 409  # READY tasks do not take chat messages
     assert chat.status_code == 202
-    assert follow_up.continuation is True
-    assert follow_up.human_messages[-1] == f"{WEB_ACTOR}: while starting"
+    assert (
+        harness.context.storage.get_task("DEMO-1").workflow_phase is WorkflowPhase.HUMAN_REVIEW
+    )
     assert harness.executor.max_active == 1
 
 
@@ -257,7 +270,7 @@ async def test_parallel_resume_clicks_launch_one_turn(harness: Harness) -> None:
 
 @pytest.mark.anyio
 async def test_approve_matches_cli_semantics(harness: Harness) -> None:
-    _waiting_for_human(harness.context)
+    _waiting_for_human(harness.context, resting_phase="HUMAN_REVIEW")
     async with _client(harness.app) as client:
         approve = await _act(client, "approve")
         again = await _act(client, "approve")
@@ -277,7 +290,7 @@ async def test_approve_refused_during_active_turn_and_with_pending_chat(
     tmp_path: Path,
 ) -> None:
     h = Harness(tmp_path)  # runner not started: queued chat stays queued
-    _waiting_for_human(h.context)
+    _waiting_for_human(h.context, resting_phase="HUMAN_REVIEW")
     async with _client(h.app) as client:
         await client.post(
             "/api/tasks/DEMO-1/messages",
@@ -378,7 +391,7 @@ async def test_reset_refused_while_an_execution_owns_the_task(harness: Harness) 
 async def test_backend_reports_action_availability_per_state(harness: Harness) -> None:
     async with _client(harness.app) as client:
         ready = (await client.get("/api/tasks/DEMO-1")).json()
-        _waiting_for_human(harness.context)
+        _waiting_for_human(harness.context, resting_phase="HUMAN_REVIEW")
         waiting = (await client.get("/api/tasks/DEMO-1")).json()
         harness.context.sessions.pause("DEMO-1", _cli_human())
         paused = (await client.get("/api/tasks/DEMO-1")).json()
@@ -387,7 +400,7 @@ async def test_backend_reports_action_availability_per_state(harness: Harness) -
     assert ready["actions"]["approve"]["reason"] == (
         "Task cannot be approved until it is waiting for human review."
     )
-    assert _allowed(waiting) == {"pause", "approve", "reject", "reset"}
+    assert _allowed(waiting) == {"pause", "approve", "defer", "reject", "reset"}
     assert _allowed(paused) == {"resume", "reset"}
     assert paused["actions"]["pause"]["reason"] == "Task is already paused."
 
@@ -452,9 +465,18 @@ async def test_foreign_lock_errors_do_not_leak_internals(harness: Harness) -> No
 async def test_full_browser_lifecycle_start_chat_pause_resume_approve(
     harness: Harness,
 ) -> None:
+    """A clean Start now reaches Human Review in one turn (Phase 3); a plain
+    chat message and a plain resume from there are recorded but run no further
+    agent turn (sections 22/23) -- only Approve moves it to COMPLETED here.
+    """
+
     async with _client(harness.app) as client:
         await _act(client, "start", client_action_id="life-start-01")
         _wait_for(lambda: harness.status() is TaskStatus.WAITING_FOR_HUMAN and harness.idle())
+        assert (
+            harness.context.storage.get_task("DEMO-1").workflow_phase
+            is WorkflowPhase.HUMAN_REVIEW
+        )
         await client.post(
             "/api/tasks/DEMO-1/messages",
             json={"message": "Double-check the tests.", "client_message_id": "life-chat-01"},
@@ -468,7 +490,9 @@ async def test_full_browser_lifecycle_start_chat_pause_resume_approve(
         messages = (await client.get("/api/tasks/DEMO-1/messages")).json()
 
     assert approve.status_code == 200 and harness.status() is TaskStatus.COMPLETED
-    assert [r.continuation for r in harness.executor.requests] == [False, True, True]
+    # Implementation, then a fresh Review: neither the chat message nor the
+    # resume (both while resting in Human Review) started another turn.
+    assert [r.continuation for r in harness.executor.requests] == [False, False]
     assert any(m["content"] == "Double-check the tests." for m in messages)
     assert harness.executor.max_active == 1
 

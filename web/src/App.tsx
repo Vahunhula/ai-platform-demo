@@ -238,6 +238,17 @@ function App({ user, onSignOut }: AppProps) {
     selectTask(task.id);
   };
 
+  const taskRemoved = () => {
+    window.clearTimeout(refreshTimer.current);
+    setSelectedId(null);
+    setDetail(null);
+    setEvents([]);
+    setMessages(null);
+    setDiff(null);
+    setStreamAfter(null);
+    void loadTasks();
+  };
+
   return (
     <div className="app-shell">
       <header className="topbar">
@@ -329,13 +340,20 @@ function App({ user, onSignOut }: AppProps) {
                   {detail.queued_messages > 0 && (
                     <span className="chip chip-warn">{detail.queued_messages} queued message(s)</span>
                   )}
+                  {detail.disposition && (
+                    <span className="chip">Disposition: {detail.disposition}</span>
+                  )}
                   <span className="chip">Writer: {detail.writer ?? "none"}</span>
                   <span className="chip">Verification: {detail.verification_status}</span>
                   <span className="chip">
                     Model: {[detail.model_tier, detail.model_name].filter(Boolean).join(" / ") || "not selected"}
                   </span>
                 </div>
-                <TaskControls detail={detail} onChanged={() => scheduleRefresh(detail.id)} />
+                <TaskControls
+                  detail={detail}
+                  onChanged={() => scheduleRefresh(detail.id)}
+                  onRemoved={taskRemoved}
+                />
               </section>
 
               <TaskOverview detail={detail} />
@@ -362,6 +380,7 @@ function App({ user, onSignOut }: AppProps) {
                       config={config}
                       user={user}
                       messages={messages}
+                      events={events}
                       onSubmitted={() => scheduleRefresh(detail.id)}
                     />
                   )}

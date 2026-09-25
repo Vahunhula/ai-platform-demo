@@ -5,17 +5,18 @@ import { newClientId } from "../api/ids";
 import type { ControlAction, ControlRequest, ControlResponse, TaskDetail } from "../types/api";
 import { ConfirmDialog } from "./ConfirmDialog";
 
-const ORDER: ControlAction[] = ["start", "resume", "pause", "approve", "reject", "reset"];
+const ORDER: ControlAction[] = ["start", "resume", "pause", "approve", "defer", "reject", "reset"];
 const LABEL: Record<ControlAction, string> = {
   start: "Start",
   resume: "Resume",
   pause: "Pause",
   approve: "Approve",
+  defer: "Defer…",
   reject: "Reject…",
   reset: "Reset…",
 };
 // Start and pause act immediately; the others open a dialog first.
-const NEEDS_DIALOG = new Set<ControlAction>(["resume", "approve", "reject", "reset"]);
+const NEEDS_DIALOG = new Set<ControlAction>(["resume", "approve", "defer", "reject", "reset"]);
 
 interface Feedback {
   tone: "info" | "error";
@@ -39,6 +40,8 @@ function successText(response: ControlResponse): string {
         : "Task paused.";
     case "approve":
       return "Task approved and completed. Nothing was committed, pushed or merged.";
+    case "defer":
+      return "Task deferred and closed. Nothing was committed, pushed or merged.";
     case "reset":
       return "Task reset to READY. Its history is kept.";
   }
@@ -47,13 +50,14 @@ function successText(response: ControlResponse): string {
 interface Props {
   detail: TaskDetail;
   onChanged: () => void;
+  onRemoved: () => void;
 }
 
-export function TaskControls({ detail, onChanged }: Props) {
-  const [dialog, setDialog] = useState<ControlAction | null>(null);
+export function TaskControls({ detail, onChanged, onRemoved }: Props) {
+  const [dialog, setDialog] = useState<ControlAction | "remove" | null>(null);
   const [dialogText, setDialogText] = useState("");
   const [dialogKey, setDialogKey] = useState("");
-  const [busy, setBusy] = useState<ControlAction | null>(null);
+  const [busy, setBusy] = useState<ControlAction | "remove" | null>(null);
   const [dialogError, setDialogError] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<Feedback | null>(null);
 
@@ -89,6 +93,22 @@ export function TaskControls({ detail, onChanged }: Props) {
     }
   }
 
+  async function removeTask() {
+    setBusy("remove");
+    setDialogError(null);
+    try {
+      await api.removeTask(detail.id);
+      setDialog(null);
+      onRemoved();
+    } catch (reason) {
+      const error = reason instanceof ApiError ? reason : new ApiError(String(reason), 0);
+      setDialogError(error.message);
+      if (!error.retryable) onChanged();
+    } finally {
+      setBusy(null);
+    }
+  }
+
   function click(action: ControlAction) {
     if (NEEDS_DIALOG.has(action)) {
       setDialog(action);
@@ -107,7 +127,9 @@ export function TaskControls({ detail, onChanged }: Props) {
     if (dialog === "reject")
       void perform({ action: "reject", client_action_id: dialogKey, message: dialogText }, true);
     if (dialog === "approve") void perform({ action: "approve" }, true);
+    if (dialog === "defer") void perform({ action: "defer" }, true);
     if (dialog === "reset") void perform({ action: "reset", confirm: true }, true);
+    if (dialog === "remove") void removeTask();
   }
 
   return (
@@ -123,6 +145,18 @@ export function TaskControls({ detail, onChanged }: Props) {
             {busy === action ? "Working…" : LABEL[action]}
           </button>
         ))}
+        {detail.can_remove && (
+          <button
+            className="control danger"
+            onClick={() => {
+              setDialog("remove");
+              setDialogError(null);
+            }}
+            disabled={busy !== null}
+          >
+            {busy === "remove" ? "Removing…" : "Remove task…"}
+          </button>
+        )}
         {allowed.length === 0 && (
           <span className="muted">
             {detail.pause_requested
@@ -221,6 +255,21 @@ export function TaskControls({ detail, onChanged }: Props) {
           </p>
         </ConfirmDialog>
       )}
+      {dialog === "defer" && (
+        <ConfirmDialog
+          title={`Defer ${detail.id}`}
+          confirmLabel="Defer task"
+          busy={busy !== null}
+          error={dialogError}
+          onConfirm={confirm}
+          onCancel={() => setDialog(null)}
+        >
+          <p>
+            This records the terminal <strong>DEFERRED</strong> disposition and stops work on the
+            task. The workspace and history remain until explicitly removed.
+          </p>
+        </ConfirmDialog>
+      )}
       {dialog === "reset" && (
         <ConfirmDialog
           title={`Reset ${detail.id}?`}
@@ -242,6 +291,26 @@ export function TaskControls({ detail, onChanged }: Props) {
               <strong>Keeps</strong> the full history: trace, tests and conversation.
             </li>
           </ul>
+        </ConfirmDialog>
+      )}
+      {dialog === "remove" && (
+        <ConfirmDialog
+          title="Remove task permanently?"
+          confirmLabel="Remove permanently"
+          tone="danger"
+          busy={busy !== null}
+          error={dialogError}
+          onConfirm={confirm}
+          onCancel={() => setDialog(null)}
+        >
+          <p>This will permanently delete:</p>
+          <ul>
+            <li>task conversation</li>
+            <li>workflow history and artifacts</li>
+            <li>workspace</li>
+            <li>AI session metadata</li>
+          </ul>
+          <p><strong>This cannot be undone.</strong></p>
         </ConfirmDialog>
       )}
     </div>

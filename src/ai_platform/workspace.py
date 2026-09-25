@@ -8,6 +8,7 @@ import subprocess
 import tarfile
 import tempfile
 from abc import ABC, abstractmethod
+from contextlib import suppress
 from hashlib import sha256
 from pathlib import Path
 
@@ -246,8 +247,15 @@ class LocalWorkspaceProvider(WorkspaceProvider):
         workspace = self.get_path(task_id).resolve()
         if workspace.parent != self.root:
             raise WorkspaceError("Refusing to remove a path outside the workspace root")
+        if (
+            workspace == self.source_repository
+            or workspace in self.source_repository.parents
+            or self.source_repository in workspace.parents
+        ):
+            raise WorkspaceError("Refusing to remove the source repository")
         if workspace.exists():
-            shutil.rmtree(workspace)
+            with suppress(FileNotFoundError):
+                shutil.rmtree(workspace)
 
     def _existing_workspace(self, task_id: str) -> Path:
         workspace = self.get_path(task_id)

@@ -35,7 +35,7 @@ def heartbeat(
 ) -> PresenceResponse:
     """Mark the authenticated user as viewing the task; returns who is viewing it."""
 
-    task = context.sessions.get_definition(task_id)
+    task = context.sessions.get_session(task_id).definition
     presence: PresenceService = request.app.state.presence
     return _response(task.id, presence.heartbeat(task.id, user))
 
@@ -44,6 +44,6 @@ def heartbeat(
 def viewers(
     task_id: str, request: Request, _user: UserDependency, context: ContextDependency
 ) -> PresenceResponse:
-    task = context.sessions.get_definition(task_id)
+    task = context.sessions.get_session(task_id).definition
     presence: PresenceService = request.app.state.presence
     return _response(task.id, presence.active(task.id))

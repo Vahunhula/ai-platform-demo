@@ -159,8 +159,17 @@ class TaskActions(BaseModel):
     pause: ActionState
     resume: ActionState
     approve: ActionState
+    defer: ActionState
     reject: ActionState
     reset: ActionState
+
+
+class ReadinessSummary(BaseModel):
+    """The most recent readiness gate evaluated for this task, of any phase."""
+
+    phase: WorkflowPhase
+    score: float
+    eligible_for_auto_progression: bool
 
 
 class TaskDetailResponse(TaskListItem):
@@ -178,6 +187,10 @@ class TaskDetailResponse(TaskListItem):
     actions: TaskActions
     created_at: datetime
     default_model_selection: LogicalModel
+    latest_readiness: ReadinessSummary | None = None
+    disposition: Literal["CONFIRMED", "DEFERRED"] | None
+    can_remove: bool
+    remove_disabled_reason: str | None
 
 
 class ModelCatalogResponse(BaseModel):
@@ -361,6 +374,45 @@ class PostMessageResponse(BaseModel):
     duplicate: bool
 
 
+class CommandMetadataResponse(BaseModel):
+    name: str
+    description: str
+    usage: str
+    arguments: list[str]
+    required_permission: Literal["viewer", "developer"]
+    available: bool
+    disabled_reason: str | None
+    mutating: bool
+
+
+class ExecuteCommandRequest(BaseModel):
+    """Command text only; actor identity always comes from the session."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    command_text: str = Field(min_length=1, max_length=MAX_MESSAGE_LENGTH)
+    client_command_id: str = Field(pattern=r"^[A-Za-z0-9_-]{8,100}$")
+
+
+class CommandResultResponse(BaseModel):
+    command: str
+    status: Literal["completed", "accepted"]
+    message: str
+    data: dict[str, Any]
+
+
+class ClaudeCommandMetadataResponse(BaseModel):
+    namespace: Literal["claude"]
+    command: str
+    description: str
+    usage: str
+    classification: Literal["NATIVE", "ADAPTED", "DISABLED", "FUTURE_INFRA_ONLY"]
+    required_permission: Literal["viewer", "developer"]
+    executor_capability: str
+    available: bool
+    disabled_reason: str | None
+
+
 ClientActionId = Field(pattern=r"^[A-Za-z0-9_-]{8,100}$")
 
 
@@ -415,7 +467,7 @@ class ResetRequest(BaseModel):
     confirm: Literal[True]
 
 
-ActionName = Literal["start", "pause", "resume", "approve", "reject", "reset"]
+ActionName = Literal["start", "pause", "resume", "approve", "defer", "reject", "reset"]
 
 
 class ControlResponse(BaseModel):

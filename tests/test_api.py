@@ -254,17 +254,21 @@ def test_mutation_routes_are_exactly_auth_presence_messages_and_controls() -> No
         ("/api/auth/login", "POST"),
         ("/api/auth/logout", "POST"),
         ("/api/tasks", "POST"),
+        ("/api/tasks/{task_id}", "DELETE"),
         ("/api/tasks/{task_id}/model-routing/default", "PUT"),
         ("/api/tasks/{task_id}/model-routing/phases/{phase}", "PUT"),
         *(
             (f"/api/tasks/{{task_id}}/{name}", "POST")
             for name in (
                 "messages",
+                "commands",
+                "claude-commands",
                 "presence",
                 "start",
                 "pause",
                 "resume",
                 "approve",
+                "defer",
                 "reject",
                 "reset",
                 "phase",

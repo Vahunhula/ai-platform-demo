@@ -12,6 +12,8 @@ from fastapi.responses import JSONResponse
 from ai_platform.api.presenters import Presenter
 from ai_platform.api.routes.auth import router as auth_router
 from ai_platform.api.routes.catalog import router as catalog_router
+from ai_platform.api.routes.claude_commands import router as claude_commands_router
+from ai_platform.api.routes.commands import router as commands_router
 from ai_platform.api.routes.config import router as config_router
 from ai_platform.api.routes.controls import router as controls_router
 from ai_platform.api.routes.health import router as health_router
@@ -23,6 +25,14 @@ from ai_platform.api.routes.tasks import router as tasks_router
 from ai_platform.api.security import SameOriginMutationMiddleware, require_user
 from ai_platform.application import ApplicationContext, create_application_context
 from ai_platform.auth import AuthService, InvalidCredentialsError
+from ai_platform.claude_commands import ClaudeCommandService
+from ai_platform.commands import (
+    CommandArgumentError,
+    CommandParseError,
+    CommandService,
+    CommandUnavailableError,
+    UnknownCommandError,
+)
 from ai_platform.controls import (
     ActionConflictError,
     PermissionDeniedError,
@@ -36,6 +46,11 @@ from ai_platform.conversation import (
 )
 from ai_platform.model_preferences import ModelPreferenceService
 from ai_platform.presence import PresenceService
+from ai_platform.removal import (
+    TaskRemovalConflictError,
+    TaskRemovalPermissionError,
+    TaskRemovalService,
+)
 from ai_platform.repositories import RepositoryError
 from ai_platform.router import ModelRoutingError
 from ai_platform.runner import TaskTurnRunner
@@ -63,6 +78,9 @@ def _wire(
     application.state.task_creation = TaskCreationService(
         context.storage, context.repositories, auth, context.workspaces
     )
+    application.state.removal = TaskRemovalService(
+        context.storage, context.workspaces, settings.checkpoint_db_path
+    )
     application.state.cookie_secure = settings.cookie_secure
     application.state.presence = PresenceService(context.storage, auth)
     application.state.presenter = Presenter(settings, auth.display_names)
@@ -71,7 +89,12 @@ def _wire(
         context.storage,
         on_submitted=runner.wake if runner is not None else None,
     )
-    application.state.controls = TaskControlService(context.sessions, context.storage, runner)
+    controls = TaskControlService(context.sessions, context.storage, runner)
+    application.state.controls = controls
+    application.state.commands = CommandService(context.sessions, context.storage, controls)
+    application.state.claude_commands = ClaudeCommandService(
+        context.sessions, context.storage, settings
+    )
     application.state.model_preferences = ModelPreferenceService(
         context.storage, context.model_catalog
     )
@@ -136,7 +159,10 @@ def create_app(
         return error(401, "Invalid credentials")
 
     @application.exception_handler(PermissionDeniedError)
-    async def permission_denied(_request: Request, exc: PermissionDeniedError) -> JSONResponse:
+    @application.exception_handler(TaskRemovalPermissionError)
+    async def permission_denied(
+        _request: Request, exc: PermissionDeniedError | TaskRemovalPermissionError
+    ) -> JSONResponse:
         return error(403, str(exc))
 
     @application.exception_handler(TaskNotFoundError)
@@ -154,8 +180,26 @@ def create_app(
         return error(409, str(exc))
 
     @application.exception_handler(ActionConflictError)
-    async def action_conflict(_request: Request, exc: ActionConflictError) -> JSONResponse:
+    @application.exception_handler(TaskRemovalConflictError)
+    async def action_conflict(
+        _request: Request, exc: ActionConflictError | TaskRemovalConflictError
+    ) -> JSONResponse:
         return error(409, str(exc))
+
+    @application.exception_handler(CommandUnavailableError)
+    async def command_unavailable(_request: Request, exc: CommandUnavailableError) -> JSONResponse:
+        return error(409, str(exc))
+
+    @application.exception_handler(CommandArgumentError)
+    async def command_argument_error(_request: Request, exc: CommandArgumentError) -> JSONResponse:
+        return error(422, str(exc))
+
+    @application.exception_handler(CommandParseError)
+    @application.exception_handler(UnknownCommandError)
+    async def command_validation_error(
+        _request: Request, exc: CommandParseError | UnknownCommandError
+    ) -> JSONResponse:
+        return error(400, str(exc))
 
     @application.exception_handler(WorkflowConflictError)
     async def workflow_conflict(_request: Request, exc: WorkflowConflictError) -> JSONResponse:
@@ -209,6 +253,8 @@ def create_app(
         catalog_router,
         models_router,
         tasks_router,
+        commands_router,
+        claude_commands_router,
         messages_router,
         controls_router,
         presence_router,

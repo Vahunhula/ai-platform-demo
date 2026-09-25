@@ -70,6 +70,8 @@ async def event_stream(
     last_sent = monotonic()
     last_auth_check = monotonic()
     while not await is_disconnected():
+        if await run_in_threadpool(context.storage.get_task, task_id) is None:
+            return
         if monotonic() - last_auth_check >= keepalive_seconds:
             if not await still_authenticated():
                 return
@@ -101,7 +103,7 @@ async def stream_task(
     after: int | None = Query(default=None, ge=0),
     last_event_id: str | None = Header(default=None),
 ) -> StreamingResponse:
-    definition = await run_in_threadpool(context.sessions.get_definition, task_id)
+    session = await run_in_threadpool(context.sessions.get_session, task_id)
     cursor = _cursor(last_event_id, after)
     auth: AuthService = request.app.state.auth
     secret = session_secret(request)
@@ -113,7 +115,7 @@ async def stream_task(
         event_stream(
             context,
             presenter,
-            definition.id,
+            session.definition.id,
             cursor,
             is_disconnected=request.is_disconnected,
             still_authenticated=still_authenticated,

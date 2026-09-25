@@ -22,17 +22,18 @@ atomic writer lock (start/resume/reject/reset), compare-and-set updates
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import Protocol
 from uuid import NAMESPACE_URL, uuid5
 
 from ai_platform.approval import ApprovalError
 from ai_platform.auth import AuthenticatedUser
+from ai_platform.events import ActorType, Event, EventType
 from ai_platform.models import (
     ExecutionKind,
     TaskRecord,
     TaskStatus,
     VerificationStatus,
 )
-from ai_platform.runner import TaskTurnRunner
 from ai_platform.sessions import (
     ExecutorUnavailableError,
     PreparedTurn,
@@ -42,6 +43,7 @@ from ai_platform.sessions import (
     TaskSessionService,
 )
 from ai_platform.storage import SQLiteStorage
+from ai_platform.workflow import WorkflowPhase
 
 
 class ControlAction(StrEnum):
@@ -49,6 +51,7 @@ class ControlAction(StrEnum):
     PAUSE = "pause"
     RESUME = "resume"
     APPROVE = "approve"
+    DEFER = "defer"
     REJECT = "reject"
     RESET = "reset"
 
@@ -92,6 +95,12 @@ class ControlResult:
     deferred: bool | None = None
 
 
+class PreparedTurnRunner(Protocol):
+    """Minimal runner boundary used by HTTP (background) and CLI (foreground)."""
+
+    def run_prepared_turn(self, prepared: PreparedTurn) -> None: ...
+
+
 class TaskControlService:
     """HTTP-facing lifecycle controls that delegate every transition to the core."""
 
@@ -99,7 +108,7 @@ class TaskControlService:
         self,
         sessions: TaskSessionService,
         storage: SQLiteStorage,
-        runner: TaskTurnRunner | None,
+        runner: PreparedTurnRunner | None,
     ) -> None:
         self.sessions = sessions
         self.storage = storage
@@ -159,6 +168,8 @@ class TaskControlService:
         if action is ControlAction.APPROVE:
             if status is not TaskStatus.WAITING_FOR_HUMAN:
                 return "Task cannot be approved until it is waiting for human review."
+            if record.workflow_phase is not WorkflowPhase.HUMAN_REVIEW:
+                return "Task cannot be approved until it reaches Human Review."
             if record.verification_status is not VerificationStatus.PASSED:
                 return "Task cannot be approved until verification has passed."
             if writer:
@@ -168,6 +179,19 @@ class TaskControlService:
             if pending := self.storage.pending_message_count(record.task_id):
                 return (
                     f"A task cannot be approved while accepted human instructions are "
+                    f"still queued ({pending})."
+                )
+            return None
+        if action is ControlAction.DEFER:
+            if status is not TaskStatus.WAITING_FOR_HUMAN:
+                return "Task can only be deferred while it is waiting for human review."
+            if record.workflow_phase is not WorkflowPhase.HUMAN_REVIEW:
+                return "Task can only be deferred from Human Review."
+            if writer:
+                return OWNED
+            if pending := self.storage.pending_message_count(record.task_id):
+                return (
+                    "A task cannot be deferred while accepted human instructions are "
                     f"still queued ({pending})."
                 )
             return None
@@ -280,6 +304,38 @@ class TaskControlService:
         self._require(ControlAction.APPROVE, task.id)
         self._core(lambda: self.sessions.approve(task.id, user.human))
         return ControlResult(ControlAction.APPROVE, task.id, False)
+
+    def defer(self, task_id: str, user: AuthenticatedUser) -> ControlResult:
+        """Record an explicit terminal decision to stop work without confirmation."""
+
+        self._authorize(user)
+        task = self.sessions.get_definition(task_id)
+        self._require(ControlAction.DEFER, task.id)
+        if not self.storage.try_defer_task(task.id):
+            raise ActionConflictError("Task changed while it was being deferred.")
+        self.storage.append_event(
+            Event(
+                task_id=task.id,
+                event_type=EventType.HUMAN_DEFERRED,
+                actor_type=ActorType.HUMAN,
+                actor_id=user.username,
+                metadata={"display_name": user.display_name},
+            )
+        )
+        self.storage.append_event(
+            Event(
+                task_id=task.id,
+                event_type=EventType.STATUS_CHANGED,
+                actor_type=ActorType.SYSTEM,
+                actor_id="task-control",
+                metadata={
+                    "from": TaskStatus.WAITING_FOR_HUMAN.value,
+                    "to": TaskStatus.COMPLETED.value,
+                    "disposition": "DEFERRED",
+                },
+            )
+        )
+        return ControlResult(ControlAction.DEFER, task.id, False)
 
     def reset(self, task_id: str, user: AuthenticatedUser) -> ControlResult:
         self._authorize(user)

@@ -30,6 +30,13 @@ class TaskStatus(StrEnum):
     FAILED = "failed"
 
 
+class TaskDisposition(StrEnum):
+    """Explicit terminal human disposition, separate from lifecycle and workflow phase."""
+
+    CONFIRMED = "CONFIRMED"
+    DEFERRED = "DEFERRED"
+
+
 class ExecutionKind(StrEnum):
     """Mutually exclusive workspace writers."""
 
@@ -132,6 +139,7 @@ class TaskRecord(BaseModel):
     description: str | None = None
     difficulty: TaskDifficulty
     status: TaskStatus
+    disposition: TaskDisposition | None = None
     workflow_phase: WorkflowPhase = WorkflowPhase.BRAINSTORM
     default_model_selection: LogicalModel = LogicalModel.AUTO
     selected_tier: ModelTier | None = None
@@ -155,6 +163,8 @@ class TaskRecord(BaseModel):
     execution_started_at: datetime | None = None
     execution_heartbeat_at: datetime | None = None
     pause_requested: bool = False
+    removal_started_at: datetime | None = None
+    removal_started_by: str | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 

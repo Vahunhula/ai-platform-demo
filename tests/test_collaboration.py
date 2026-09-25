@@ -22,6 +22,7 @@ from ai_platform.router import ModelRouter
 from ai_platform.sessions import TaskSessionError, TaskSessionService
 from ai_platform.storage import SQLiteStorage
 from ai_platform.task_loader import get_task, load_tasks
+from ai_platform.workflow import WorkflowPhase
 from ai_platform.workspace import LocalWorkspaceProvider, WorkspaceError
 from tests.fakes import FakeAgentExecutor
 
@@ -187,6 +188,16 @@ def test_attach_renders_shared_participants_and_conversation(tmp_path: Path) -> 
 
 
 def test_shared_takeover_resume_reject_and_human_approval(tmp_path: Path) -> None:
+    """Multi-user collaboration around the Phase 3 pipeline's Human Review stop.
+
+    Starting cleanly flows all the way to Human Review in one turn (no human
+    needed before it). From there: a plain chat message is recorded but starts
+    no turn; pause/shell/resume remain available for workspace custody but a
+    resume from Human Review runs no agent either (Phase 3, section 22); only
+    an explicit Reject reopens Implementation (section 23), and only then does
+    approval become possible.
+    """
+
     source = Path(__file__).parents[1] / "demo_repo" / "app" / "messages.py"
     source_before = source.read_bytes()
     executor = FakeAgentExecutor()
@@ -197,10 +208,17 @@ def test_shared_takeover_resume_reject_and_human_approval(tmp_path: Path) -> Non
 
     service.start("DEMO-1", vakho)
     workspace = workspaces.get_path("DEMO-1")
-    service.message("DEMO-1", "Check for the typo elsewhere.", alex)
+    assert storage.get_task("DEMO-1").workflow_phase is WorkflowPhase.HUMAN_REVIEW
+    assert len(executor.requests) == 2  # Implementation, then a fresh Review
+
+    # A plain chat message while in Human Review is recorded but starts no turn.
+    outcome = service.message("DEMO-1", "Check for the typo elsewhere.", alex)
+    assert outcome.agent_started is False
     assert len(executor.requests) == 2
-    assert executor.requests[-1].continuation is True
-    assert any("alex:" in message for message in executor.requests[-1].human_messages)
+    assert any(
+        event.event_type is EventType.HUMAN_MESSAGE and event.actor_id == "alex"
+        for event in storage.get_events("DEMO-1")
+    )
 
     assert service.pause("DEMO-1", david) is False
     assert storage.get_task("DEMO-1").status is TaskStatus.PAUSED_BY_HUMAN
@@ -217,16 +235,26 @@ def test_shared_takeover_resume_reject_and_human_approval(tmp_path: Path) -> Non
     ]
     assert len(executor.requests) == request_count
 
+    # Resuming from Human Review records the instruction but still runs no
+    # agent: only Approve/Reject move a Human Review task forward.
     service.resume("DEMO-1", david, "Review my manual change and continue.")
-    assert executor.requests[-1].workspace_path == workspace
-    assert executor.requests[-1].human_workspace_changed is True
-    assert executor.requests[-1].continuation is True
+    assert len(executor.requests) == request_count
+    assert any(
+        event.event_type is EventType.HUMAN_MESSAGE
+        and event.actor_id == "david"
+        and event.metadata["message"] == "Review my manual change and continue."
+        for event in storage.get_events("DEMO-1")
+    )
     assert (workspace / "app" / "messages.py").read_text(encoding="utf-8").endswith(
         "# reviewed manually\n"
     )
 
+    # Reject sends Human Review back to Implementation (MANUAL) with feedback;
+    # that reopened turn flows through Review to Human Review again.
     service.reject("DEMO-1", "Please keep the implementation simple.", alex)
+    assert storage.get_task("DEMO-1").workflow_phase is WorkflowPhase.HUMAN_REVIEW
     assert executor.requests[-1].workspace_path == workspace
+    assert len(executor.requests) == request_count + 2  # Implementation, then Review again
     service.approve("DEMO-1", vakho)
 
     record = storage.get_task("DEMO-1")
@@ -279,9 +307,13 @@ def test_shell_releases_lock_when_initial_workspace_snapshot_fails(
 
 
 def test_second_message_cannot_race_agent_and_pause_stops_next_turn(tmp_path: Path) -> None:
-    initial = FakeAgentExecutor()
+    # Never fixes: Implementation's gate stays ineligible, so the task rests at
+    # IMPLEMENTATION + WAITING_FOR_HUMAN (not Human Review) and a chat message
+    # still starts a turn, which is what this race/pause scenario exercises.
+    initial = FakeAgentExecutor(fix_on_attempt=None)
     service, storage, workspaces = _service(tmp_path, initial)
     service.start("DEMO-1", _human("vakho"))
+    assert storage.get_task("DEMO-1").workflow_phase is WorkflowPhase.IMPLEMENTATION
     blocking = BlockingFakeAgentExecutor()
     service.executor_factory = lambda: blocking
 

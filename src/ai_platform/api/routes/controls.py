@@ -112,6 +112,18 @@ def approve_task(
     return _respond(context, controls.approve(task_id, user))
 
 
+@router.post("/{task_id}/defer", response_model=ControlResponse, responses=_RESPONSES)
+def defer_task(
+    task_id: str,
+    controls: ControlsDependency,
+    context: ContextDependency,
+    user: DeveloperDependency,
+) -> JSONResponse:
+    """Record an explicit terminal DEFERRED disposition."""
+
+    return _respond(context, controls.defer(task_id, user))
+
+
 @router.post("/{task_id}/reset", response_model=ControlResponse, responses=_RESPONSES)
 def reset_task(
     task_id: str,

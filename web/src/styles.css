@@ -819,10 +819,49 @@ details summary {
 }
 
 .composer {
+  position: relative;
   padding: 14px 24px 18px;
   background: #f8faf8;
   border-top: 1px solid #d9e0db;
 }
+
+.command-menu {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 100%;
+  z-index: 10;
+  max-height: 18rem;
+  overflow: auto;
+  padding: 0.35rem;
+  border: 1px solid #d8dfda;
+  border-radius: 0.5rem;
+  background: var(--panel, #fff);
+  box-shadow: 0 0.5rem 1.5rem rgb(0 0 0 / 15%);
+}
+
+.command-menu button {
+  display: flex;
+  width: 100%;
+  flex-direction: column;
+  align-items: flex-start;
+  padding: 0.55rem 0.65rem;
+  border: 0;
+  border-radius: 0.35rem;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+}
+
+.command-menu button.active { background: rgb(70 120 220 / 12%); }
+.command-menu button.disabled { opacity: 0.65; }
+.command-menu small { margin-top: 0.2rem; color: var(--muted, #687080); }
+.command-menu.claude { border-color: #b9a3df; }
+.command-namespace { padding: 0.35rem 0.65rem; color: #6b4da2; font-size: 0.75rem; font-weight: 800; text-transform: uppercase; }
+.command-menu .classification { display: inline; margin-left: 0.35rem; color: #6b4da2; font-size: 0.68rem; }
+.command-empty { padding: 0.65rem; color: var(--muted, #687080); }
+.command-result { margin-bottom: 0.5rem; padding: 0.55rem; border-left: 3px solid #4a7bd0; }
+.message.platform { border-left: 3px solid #4a7bd0; }
 
 .composer textarea {
   width: 100%;

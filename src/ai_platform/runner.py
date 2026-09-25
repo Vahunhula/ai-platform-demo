@@ -208,6 +208,12 @@ class TaskTurnRunner:
             return True
 
         if not outcome.agent_started:
+            if outcome.terminal:
+                # Final, not a race: e.g. the task rests in HUMAN_REVIEW, where
+                # no agent turn ever runs automatically. The message was
+                # recorded; deliver it as completed rather than retrying forever.
+                self.storage.finish_message(message.message_id, MessageStatus.COMPLETED)
+                return True
             # Another writer took the task first (e.g. a CLI turn): try again later.
             self.storage.requeue_message(message.message_id)
             return False

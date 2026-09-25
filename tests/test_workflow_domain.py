@@ -339,26 +339,32 @@ def test_readiness_formula_threshold_blockers_and_zero_are_deterministic() -> No
 
 def test_checklist_status_validation_history_evidence_and_concurrency(tmp_path: Path) -> None:
     with pytest.raises(ValidationError):
-        ChecklistResult(key="scope_complete", status="MAYBE", evidence="no")
+        ChecklistResult(key="implementation_steps_complete", status="MAYBE", evidence="no")
     storage = _storage(tmp_path)
     service = ChecklistService(storage)
     actor = _developer()
     results = [
-        ChecklistResult(key="scope_complete", status="PASS", evidence="Scope listed"),
-        ChecklistResult(key="tests_defined", status="FAIL", evidence="No test yet"),
-        ChecklistResult(key="risks_addressed", status="PASS", evidence="Risks listed"),
+        ChecklistResult(
+            key="implementation_steps_complete", status="PASS", evidence="Steps listed"
+        ),
+        ChecklistResult(key="affected_files_identified", status="FAIL", evidence="No files yet"),
+        ChecklistResult(key="validation_plan_defined", status="PASS", evidence="Tests listed"),
     ]
     first = service.evaluate("TEST-1", WorkflowPhase.PLAN, results, actor)
-    assert first.readiness.score == 70
-    assert first.readiness.blocking_failures == ["tests_defined"]
+    assert first.readiness.score == pytest.approx(55)
+    assert first.readiness.blocking_failures == ["affected_files_identified"]
     assert not first.readiness.eligible_for_auto_progression
     incomplete = service.evaluate(
         "TEST-1",
         WorkflowPhase.PLAN,
-        [ChecklistResult(key="scope_complete", status="PASS", evidence="Scope listed")],
+        [
+            ChecklistResult(
+                key="implementation_steps_complete", status="PASS", evidence="Steps listed"
+            )
+        ],
         actor,
     )
-    assert len(incomplete.items) == 3
+    assert len(incomplete.items) == 6
     assert incomplete.items[1].status is ChecklistStatus.NEEDS_HUMAN
     assert not incomplete.readiness.eligible_for_auto_progression
     barrier = threading.Barrier(4)
@@ -371,7 +377,7 @@ def test_checklist_status_validation_history_evidence_and_concurrency(tmp_path: 
         numbers = sorted(pool.map(evaluate, range(4)))
     assert numbers == [3, 4, 5, 6]
     history = storage.list_checklist_evaluations("TEST-1")
-    assert len(history) == 6 and history[0].items[1].evidence == "No test yet"
+    assert len(history) == 6 and history[0].items[1].evidence == "No files yet"
 
 
 def test_reset_preserves_phase_artifacts_and_checklists(tmp_path: Path) -> None:
