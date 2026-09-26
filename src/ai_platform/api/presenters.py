@@ -558,6 +558,7 @@ class Presenter:
             workflow_phase=record.workflow_phase,
             model_tier=(record.selected_tier.value if record.selected_tier else None),
             writer=_writer(record),
+            disposition=record.disposition,
             updated_at=record.updated_at,
         )
 
@@ -600,7 +601,6 @@ class Presenter:
             created_at=record.created_at,
             default_model_selection=record.default_model_selection,
             latest_readiness=latest_readiness,
-            disposition=record.disposition,
             can_remove=removal.allowed,
             remove_disabled_reason=removal.reason,
             repository_id=record.repository_id,

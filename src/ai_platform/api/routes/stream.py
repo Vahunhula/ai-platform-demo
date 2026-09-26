@@ -39,6 +39,7 @@ from ai_platform.auth import AuthService
 router = APIRouter(prefix="/tasks", tags=["stream"])
 
 _RETRY_MILLISECONDS = 3000
+_SSE_BATCH_SIZE = 200
 
 
 def _cursor(last_event_id: str | None, after: int | None) -> int:
@@ -76,7 +77,9 @@ async def event_stream(
             if not await still_authenticated():
                 return
             last_auth_check = monotonic()
-        events = await run_in_threadpool(context.storage.get_events_after, task_id, cursor)
+        events = await run_in_threadpool(
+            context.storage.get_events_after, task_id, cursor, limit=_SSE_BATCH_SIZE
+        )
         for event in events:
             cursor = event.sequence_id or cursor
             payload = presenter.event(event).model_dump_json()

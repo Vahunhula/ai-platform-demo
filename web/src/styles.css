@@ -1243,6 +1243,21 @@ details summary {
   border-color: #e3b5b1;
 }
 
+.removal-control {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 3px;
+}
+
+.remove-disabled-reason {
+  max-width: 320px;
+  color: #748078;
+  font-size: 11px;
+  line-height: 1.3;
+  text-align: right;
+}
+
 .why {
   color: #748078;
   font-size: 12px;

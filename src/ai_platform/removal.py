@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from contextlib import suppress
 from dataclasses import dataclass
@@ -14,6 +15,8 @@ from ai_platform.models import TaskDisposition, TaskRecord, TaskStatus
 from ai_platform.sessions import TaskNotFoundError
 from ai_platform.storage import SQLiteStorage
 from ai_platform.workspace import WorkspaceProvider
+
+logger = logging.getLogger(__name__)
 
 
 class TaskRemovalConflictError(RuntimeError):
@@ -111,16 +114,26 @@ class TaskRemovalService:
     ) -> RemovalAvailability:
         if not user.role.can_modify_tasks:
             return RemovalAvailability(False, "Developer access is required to remove a task.")
-        if record.disposition not in {TaskDisposition.CONFIRMED, TaskDisposition.DEFERRED}:
-            return RemovalAvailability(False, "Only CONFIRMED or DEFERRED tasks can be removed.")
-        if record.status is not TaskStatus.COMPLETED:
-            return RemovalAvailability(False, "Terminal task disposition is inconsistent.")
-        if record.active_execution is not None:
-            return RemovalAvailability(False, "Task has an active workspace writer.")
-        if self.storage.pending_message_count(record.task_id):
-            return RemovalAvailability(False, "Task has accepted human instructions still queued.")
         if record.removal_started_at is not None:
             return RemovalAvailability(False, "Task removal is already in progress.")
+        if record.active_execution is not None:
+            return RemovalAvailability(
+                False, "An agent turn or active workspace writer is in progress."
+            )
+        if self.storage.pending_message_count(record.task_id):
+            return RemovalAvailability(
+                False, "Accepted human instructions still queued must complete first."
+            )
+        if record.status is not TaskStatus.COMPLETED:
+            if record.workflow_phase.value == "HUMAN_REVIEW":
+                return RemovalAvailability(
+                    False, "Confirm or Defer the task in Human Review first."
+                )
+            return RemovalAvailability(
+                False, "Task must reach Human Review and be Confirmed or Deferred first."
+            )
+        if record.disposition not in {TaskDisposition.CONFIRMED, TaskDisposition.DEFERRED}:
+            return RemovalAvailability(False, "Task must be Confirmed or Deferred first.")
         return RemovalAvailability(True)
 
     def remove(self, task_id: str, user: AuthenticatedUser) -> TaskRemovalResult:
@@ -139,10 +152,12 @@ class TaskRemovalService:
                 raise TaskRemovalConflictError(str(error)) from error
             if guarded is None:
                 raise TaskNotFoundError(f"No runtime state exists for {task_id}")
+            logger.info("Task removal started task_id=%s actor=%s", guarded.task_id, user.username)
         else:
             # External cleanup is intentionally idempotent. A developer retry may
             # finish a removal left guarded by a process crash.
             guarded = current
+            logger.info("Task removal retry task_id=%s actor=%s", guarded.task_id, user.username)
 
         workspace = self.workspaces.get_path(guarded.task_id).resolve()
         session_ids = {
@@ -160,4 +175,5 @@ class TaskRemovalService:
         ):
             raise TaskRemovalConflictError("Task removal guard was lost.")
         assert guarded.disposition is not None
+        logger.info("Task removal completed task_id=%s actor=%s", guarded.task_id, user.username)
         return TaskRemovalResult(guarded.task_id, guarded.disposition)

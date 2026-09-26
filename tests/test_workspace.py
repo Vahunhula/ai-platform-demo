@@ -59,3 +59,21 @@ def test_destroy_refuses_source_repository_and_isolates_sibling_task(tmp_path: P
         provider.destroy("SOURCE")
     assert (source / "keep.txt").read_text() == "source"
     assert (sibling / "keep.txt").read_text() == "other"
+
+
+def test_workspace_symlink_cannot_redirect_reads_or_recursive_delete(tmp_path: Path) -> None:
+    source = Path(__file__).parents[1] / "demo_repo"
+    root = tmp_path / "workspaces"
+    root.mkdir()
+    sibling = root / "TASK-B"
+    sibling.mkdir()
+    marker = sibling / "keep.txt"
+    marker.write_text("task b", encoding="utf-8")
+    (root / "TASK-A").symlink_to(sibling, target_is_directory=True)
+    provider = LocalWorkspaceProvider(root, source)
+
+    with pytest.raises(WorkspaceError, match="symlinked"):
+        provider.get_diff("TASK-A")
+    with pytest.raises(WorkspaceError, match="symlinked"):
+        provider.destroy("TASK-A")
+    assert marker.read_text(encoding="utf-8") == "task b"

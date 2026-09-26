@@ -10,7 +10,7 @@ const LABEL: Record<ControlAction, string> = {
   start: "Start",
   resume: "Resume",
   pause: "Pause",
-  approve: "Approve",
+  approve: "Confirm",
   defer: "Defer…",
   reject: "Reject…",
   reset: "Reset…",
@@ -39,7 +39,7 @@ function successText(response: ControlResponse): string {
         ? "Pause requested — the agent stops at its next safe point."
         : "Task paused.";
     case "approve":
-      return "Task approved and completed. Nothing was committed, pushed or merged.";
+      return "Task confirmed and completed. Nothing was committed, pushed or merged.";
     case "defer":
       return "Task deferred and closed. Nothing was committed, pushed or merged.";
     case "reset":
@@ -145,18 +145,27 @@ export function TaskControls({ detail, onChanged, onRemoved }: Props) {
             {busy === action ? "Working…" : LABEL[action]}
           </button>
         ))}
-        {detail.can_remove && (
+        <span
+          className="removal-control"
+          title={detail.can_remove ? "Permanently remove this task" : detail.remove_disabled_reason ?? undefined}
+        >
           <button
             className="control danger"
             onClick={() => {
               setDialog("remove");
               setDialogError(null);
             }}
-            disabled={busy !== null}
+            disabled={busy !== null || !detail.can_remove}
+            aria-describedby={!detail.can_remove ? "remove-disabled-reason" : undefined}
           >
             {busy === "remove" ? "Removing…" : "Remove task…"}
           </button>
-        )}
+          {!detail.can_remove && (
+            <span id="remove-disabled-reason" className="remove-disabled-reason">
+              Disabled — {detail.remove_disabled_reason ?? "removal is unavailable."}
+            </span>
+          )}
+        </span>
         {allowed.length === 0 && (
           <span className="muted">
             {detail.pause_requested
@@ -241,14 +250,14 @@ export function TaskControls({ detail, onChanged, onRemoved }: Props) {
       )}
       {dialog === "approve" && (
         <ConfirmDialog
-          title={`Approve ${detail.id}`}
-          confirmLabel="Approve"
+          title={`Confirm ${detail.id}`}
+          confirmLabel="Confirm task"
           busy={busy !== null}
           error={dialogError}
           onConfirm={confirm}
           onCancel={() => setDialog(null)}
         >
-          <p>The platform task becomes COMPLETED. Only a reset can reopen it.</p>
+          <p>The platform task becomes COMPLETED with a CONFIRMED decision. Only a reset can reopen it.</p>
           <p>
             Nothing is committed, pushed, merged or deployed; the workspace is kept for
             inspection.
@@ -288,7 +297,7 @@ export function TaskControls({ detail, onChanged, onRemoved }: Props) {
             </li>
             <li>Returns the task to READY and clears its model tier, attempts and verification.</li>
             <li>
-              <strong>Keeps</strong> the full history: trace, tests and conversation.
+              <strong>Keeps</strong> the full history: Activity, tests and conversation.
             </li>
           </ul>
         </ConfirmDialog>
@@ -308,6 +317,7 @@ export function TaskControls({ detail, onChanged, onRemoved }: Props) {
             <li>task conversation</li>
             <li>workflow history and artifacts</li>
             <li>workspace</li>
+            <li>checkpoints</li>
             <li>AI session metadata</li>
           </ul>
           <p><strong>This cannot be undone.</strong></p>

@@ -2,7 +2,7 @@
 
 from typing import Literal
 
-from fastapi import APIRouter, Response
+from fastapi import APIRouter, HTTPException, Query, Response
 
 from ai_platform.api.dependencies import (
     ContextDependency,
@@ -20,6 +20,7 @@ from ai_platform.api.schemas import (
     CreateTaskRequest,
     CreateTaskResponse,
     DiffResponse,
+    EventPageResponse,
     EventResponse,
     ModelPreferenceRequest,
     ModelPreferenceUpdateResponse,
@@ -145,6 +146,43 @@ def get_events(
 
     events = [presenter.event(event) for event in context.sessions.get_events(task_id)]
     return list(reversed(events)) if order == "desc" else events
+
+
+@router.get("/{task_id}/events/page", response_model=EventPageResponse)
+def get_event_page(
+    task_id: str,
+    context: ContextDependency,
+    presenter: PresenterDependency,
+    order: Literal["asc", "desc"] = "desc",
+    limit: int = Query(default=50, ge=1, le=200),
+    before_sequence: int | None = Query(default=None, ge=1),
+    after_sequence: int | None = Query(default=None, ge=0),
+) -> EventPageResponse:
+    """Return a cursor-stable bounded page for Activity.
+
+    The original ``/events`` list contract remains unchanged for CLI and older
+    consumers. Descending traversal uses ``before_sequence``; ascending traversal
+    uses ``after_sequence``. Both cursors are exclusive.
+    """
+
+    canonical_id = context.sessions.get_definition(task_id).id
+    if order == "desc" and after_sequence is not None:
+        raise HTTPException(422, "after_sequence is only valid with order=asc")
+    if order == "asc" and before_sequence is not None:
+        raise HTTPException(422, "before_sequence is only valid with order=desc")
+    cursor = before_sequence if order == "desc" else after_sequence
+    events, has_more = context.storage.get_event_page(
+        canonical_id, order=order, limit=limit, cursor=cursor
+    )
+    items = [presenter.event(event) for event in events]
+    return EventPageResponse(
+        items=items,
+        order=order,
+        limit=limit,
+        has_more=has_more,
+        next_before_sequence=(items[-1].sequence_id if order == "desc" and has_more else None),
+        next_after_sequence=(items[-1].sequence_id if order == "asc" and has_more else None),
+    )
 
 
 @router.get("/{task_id}/diff", response_model=DiffResponse)

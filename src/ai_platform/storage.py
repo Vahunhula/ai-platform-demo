@@ -754,21 +754,73 @@ class SQLiteStorage:
 
         return self.get_events_after(task_id, 0)
 
-    def get_events_after(self, task_id: str, sequence_id: int) -> list[Event]:
+    def get_events_after(
+        self, task_id: str, sequence_id: int, *, limit: int | None = None
+    ) -> list[Event]:
         """Return events newer than an integer cursor, exactly once per cursor advance."""
 
+        if limit is not None and limit < 1:
+            raise ValueError("limit must be positive")
+        limit_clause = "" if limit is None else "LIMIT ?"
+        arguments: tuple[object, ...] = (task_id, sequence_id)
+        if limit is not None:
+            arguments += (limit,)
         with self._connect() as connection:
             rows = connection.execute(
-                """
+                f"""
                 SELECT sequence_id, id, task_id, timestamp, event_type,
                        actor_type, actor_id, metadata_json
                 FROM events
                 WHERE task_id = ? AND sequence_id > ?
                 ORDER BY sequence_id
+                {limit_clause}
                 """,
-                (task_id, sequence_id),
+                arguments,
             ).fetchall()
         return [self._event_from_row(row) for row in rows]
+
+    def get_event_page(
+        self,
+        task_id: str,
+        *,
+        order: str,
+        limit: int,
+        cursor: int | None = None,
+    ) -> tuple[list[Event], bool]:
+        """Return one stable, bounded sequence page and whether another page exists.
+
+        Descending pages use an exclusive ``before`` cursor; ascending pages use
+        an exclusive ``after`` cursor. Asking for one extra row makes ``has_more``
+        deterministic without a separate count query. New appends therefore cannot
+        shift or duplicate an older-history traversal.
+        """
+
+        if order not in {"asc", "desc"}:
+            raise ValueError("order must be asc or desc")
+        if not 1 <= limit <= 200:
+            raise ValueError("limit must be between 1 and 200")
+        comparison = ">" if order == "asc" else "<"
+        direction = "ASC" if order == "asc" else "DESC"
+        boundary = 0 if order == "asc" and cursor is None else cursor
+        where_cursor = "" if boundary is None else f"AND sequence_id {comparison} ?"
+        arguments: tuple[object, ...] = (task_id,)
+        if boundary is not None:
+            arguments += (boundary,)
+        arguments += (limit + 1,)
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT sequence_id, id, task_id, timestamp, event_type,
+                       actor_type, actor_id, metadata_json
+                FROM events
+                WHERE task_id = ? {where_cursor}
+                ORDER BY sequence_id {direction}
+                LIMIT ?
+                """,
+                arguments,
+            ).fetchall()
+        has_more = len(rows) > limit
+        return [self._event_from_row(row) for row in rows[:limit]], has_more
 
     def get_recent_events(
         self,

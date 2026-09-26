@@ -1,5 +1,6 @@
 """Phase 4.1 permanent TaskSession removal and isolation tests."""
 
+import asyncio
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -107,6 +108,9 @@ async def test_removal_availability_permission_and_terminal_dispositions(tmp_pat
             TaskStatus.WAITING_FOR_HUMAN,
         ):
             context.storage.update_task_status("DEMO-1", status)
+            detail = (await developer.get("/api/tasks/DEMO-1")).json()
+            assert detail["can_remove"] is False
+            assert detail["remove_disabled_reason"]
             response = await developer.delete("/api/tasks/DEMO-1")
             assert response.status_code == 409
 
@@ -115,6 +119,11 @@ async def test_removal_availability_permission_and_terminal_dispositions(tmp_pat
         assert detail["can_remove"] is True
 
     async with _client(app, username="read-only", role=Role.VIEWER) as viewer:
+        detail = (await viewer.get("/api/tasks/DEMO-1")).json()
+        assert detail["can_remove"] is False
+        assert detail["remove_disabled_reason"] == (
+            "Developer access is required to remove a task."
+        )
         response = await viewer.delete("/api/tasks/DEMO-1")
         assert response.status_code == 403
 
@@ -302,9 +311,14 @@ async def test_removal_guard_blocks_messages_claude_commands_and_sse_reconnect(
             "/api/tasks/DEMO-1/claude-commands",
             json={"command_text": "claude/status", "client_command_id": "zombie-command-1"},
         )
+        platform_command = await client.post(
+            "/api/tasks/DEMO-1/commands",
+            json={"command_text": "/status", "client_command_id": "zombie-platform-1"},
+        )
         stream = await client.get("/api/tasks/DEMO-1/stream")
     assert message.status_code == 404
     assert command.status_code == 404
+    assert platform_command.status_code == 404
     assert stream.status_code == 404
     assert all(
         event.metadata.get("message") != "zombie"
@@ -318,6 +332,31 @@ async def test_removal_guard_blocks_messages_claude_commands_and_sse_reconnect(
     assert result.task_id == "DEMO-1"
     async with _client(app) as client:
         assert (await client.get("/api/tasks/DEMO-1")).status_code == 404
+
+
+@pytest.mark.anyio
+async def test_concurrent_confirm_and_defer_have_one_terminal_winner(tmp_path: Path) -> None:
+    context = _context(tmp_path)
+    with context.storage.transaction(immediate=True) as connection:
+        connection.execute(
+            "UPDATE tasks SET status = ?, workflow_phase = ? WHERE task_id = 'DEMO-1'",
+            (TaskStatus.WAITING_FOR_HUMAN.value, WorkflowPhase.HUMAN_REVIEW.value),
+        )
+    app = create_app(context)
+    async with (
+        _client(app, username="confirm-user") as confirmer,
+        _client(app, username="defer-user") as deferrer,
+    ):
+        confirmed, deferred = await asyncio.gather(
+            confirmer.post("/api/tasks/DEMO-1/approve"),
+            deferrer.post("/api/tasks/DEMO-1/defer"),
+        )
+
+    assert sorted((confirmed.status_code, deferred.status_code)) == [200, 409]
+    record = context.storage.get_task("DEMO-1")
+    assert record is not None
+    assert record.status is TaskStatus.COMPLETED
+    assert record.disposition in {TaskDisposition.CONFIRMED, TaskDisposition.DEFERRED}
 
 
 @pytest.mark.anyio

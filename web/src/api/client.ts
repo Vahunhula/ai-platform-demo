@@ -7,7 +7,7 @@ import type {
   ConversationMessage,
   CurrentUser,
   DiffResponse,
-  PlatformEvent,
+  EventPage,
   PostMessageRequest,
   PostMessageResponse,
   PresenceResponse,
@@ -111,8 +111,11 @@ export const api = {
     request(`${task(taskId)}/model-routing/default`, put({ selection })),
   setPhaseModel: (taskId: string, phase: string, selection: LogicalModel) =>
     request(`${task(taskId)}/model-routing/phases/${phase}`, put({ selection })),
-  getEvents: (taskId: string, signal?: AbortSignal) =>
-    request<PlatformEvent[]>(`${task(taskId)}/events`, { signal }),
+  getActivityPage: (taskId: string, beforeSequence?: number, signal?: AbortSignal) => {
+    const params = new URLSearchParams({ order: "desc", limit: "50" });
+    if (beforeSequence !== undefined) params.set("before_sequence", String(beforeSequence));
+    return request<EventPage>(`${task(taskId)}/events/page?${params}`, { signal });
+  },
   getDiff: (taskId: string, signal?: AbortSignal) =>
     request<DiffResponse>(`${task(taskId)}/diff`, { signal }),
   getChecklists: (taskId: string, signal?: AbortSignal) =>

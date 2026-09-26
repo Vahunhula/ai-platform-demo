@@ -82,6 +82,7 @@ async def test_task_listing_and_known_detail(
         "workflow_phase": "IMPLEMENTATION",
         "model_tier": None,
         "writer": None,
+        "disposition": None,
     }
     assert detail.status_code == 200
     body = detail.json()

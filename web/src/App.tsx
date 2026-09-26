@@ -9,7 +9,7 @@ import { ModelRoutingPanel } from "./components/ModelRoutingPanel";
 import { TaskControls } from "./components/TaskControls";
 import { TaskSidebar } from "./components/TaskSidebar";
 import { NewTaskDialog } from "./components/NewTaskDialog";
-import { DiffTab, SummaryTab, TestsTab, TraceTab, WorkspaceTab } from "./components/tabs";
+import { ActivityTab, DiffTab, SummaryTab, TestsTab, WorkspaceTab } from "./components/tabs";
 import { WorkflowProgress } from "./components/WorkflowProgress";
 import type {
   ConfigResponse,
@@ -35,6 +35,8 @@ const DIFF_EVENTS = new Set([
 ]);
 const REFRESH_DEBOUNCE_MS = 300;
 const TASK_LIST_POLL_MS = 30_000;
+const ACTIVITY_DOM_LIMIT = 200;
+const DERIVED_EVENT_WINDOW = 500;
 
 function message(reason: unknown): string {
   return reason instanceof Error ? reason.message : String(reason);
@@ -47,7 +49,9 @@ function isAbort(reason: unknown): boolean {
 function mergeEvents(current: PlatformEvent[], incoming: PlatformEvent[]): PlatformEvent[] {
   const bySequence = new Map(current.map((event) => [event.sequence_id, event]));
   for (const event of incoming) bySequence.set(event.sequence_id, event);
-  return [...bySequence.values()].sort((left, right) => left.sequence_id - right.sequence_id);
+  return [...bySequence.values()]
+    .sort((left, right) => left.sequence_id - right.sequence_id)
+    .slice(-DERIVED_EVENT_WINDOW);
 }
 
 const STREAM_LABEL: Record<StreamState, string> = {
@@ -79,6 +83,10 @@ function App({ user, onSignOut }: AppProps) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<TaskDetail | null>(null);
   const [events, setEvents] = useState<PlatformEvent[]>([]);
+  const [activityEvents, setActivityEvents] = useState<PlatformEvent[]>([]);
+  const [activityBefore, setActivityBefore] = useState<number | null>(null);
+  const [activityAtNewest, setActivityAtNewest] = useState(true);
+  const [loadingOlder, setLoadingOlder] = useState(false);
   const [messages, setMessages] = useState<ConversationMessage[] | null>(null);
   // null = not loaded yet for the selected task; "" = loaded and empty.
   const [diff, setDiff] = useState<string | null>(null);
@@ -91,6 +99,8 @@ function App({ user, onSignOut }: AppProps) {
 
   const selectedRef = useRef<string | null>(null);
   selectedRef.current = selectedId;
+  const activityAtNewestRef = useRef(activityAtNewest);
+  activityAtNewestRef.current = activityAtNewest;
   const refreshTimer = useRef<number | undefined>(undefined);
 
   const loadTasks = useCallback(async (signal?: AbortSignal) => {
@@ -151,16 +161,19 @@ function App({ user, onSignOut }: AppProps) {
     setError(null);
     Promise.all([
       api.getTask(selectedId, controller.signal),
-      api.getEvents(selectedId, controller.signal),
+      api.getActivityPage(selectedId, undefined, controller.signal),
       api.getMessages(selectedId, controller.signal),
     ])
-      .then(([nextDetail, nextEvents, nextMessages]) => {
+      .then(([nextDetail, activityPage, nextMessages]) => {
         if (selectedRef.current !== selectedId) return;
         setDetail(nextDetail);
-        setEvents(nextEvents);
+        setEvents([...activityPage.items].sort((left, right) => left.sequence_id - right.sequence_id));
+        setActivityEvents(activityPage.items);
+        setActivityBefore(activityPage.next_before_sequence);
+        setActivityAtNewest(true);
         setMessages(nextMessages);
         setDiff(null);
-        setStreamAfter(nextEvents.at(-1)?.sequence_id ?? 0);
+        setStreamAfter(activityPage.items[0]?.sequence_id ?? 0);
       })
       .catch((reason: unknown) => {
         if (!isAbort(reason)) setError(message(reason));
@@ -178,6 +191,17 @@ function App({ user, onSignOut }: AppProps) {
       const taskId = selectedRef.current;
       if (!taskId) return;
       setEvents((current) => mergeEvents(current, [event]));
+      if (activityAtNewestRef.current) {
+        setActivityEvents((current) => {
+          const next = [...new Map([event, ...current].map((item) => [item.sequence_id, item])).values()]
+            .sort((left, right) => right.sequence_id - left.sequence_id)
+            .slice(0, ACTIVITY_DOM_LIMIT);
+          if (next.length === ACTIVITY_DOM_LIMIT) {
+            setActivityBefore(next[next.length - 1].sequence_id);
+          }
+          return next;
+        });
+      }
       if (DIFF_EVENTS.has(event.event_type)) setDiff(null);
       scheduleRefresh(taskId);
     },
@@ -206,12 +230,15 @@ function App({ user, onSignOut }: AppProps) {
     try {
       await loadTasks();
       if (selectedId) {
-        const [nextEvents] = await Promise.all([
-          api.getEvents(selectedId),
+        const [activityPage] = await Promise.all([
+          api.getActivityPage(selectedId),
           refreshSelected(selectedId),
         ]);
         if (selectedRef.current === selectedId) {
-          setEvents((current) => mergeEvents(current, nextEvents));
+          setEvents((current) => mergeEvents(current, activityPage.items));
+          setActivityEvents(activityPage.items);
+          setActivityBefore(activityPage.next_before_sequence);
+          setActivityAtNewest(true);
           setDiff(null);
         }
       }
@@ -227,6 +254,9 @@ function App({ user, onSignOut }: AppProps) {
     window.clearTimeout(refreshTimer.current);
     setDetail(null);
     setEvents([]);
+    setActivityEvents([]);
+    setActivityBefore(null);
+    setActivityAtNewest(true);
     setMessages(null);
     setDiff(null);
     setStreamAfter(null);
@@ -244,10 +274,49 @@ function App({ user, onSignOut }: AppProps) {
     setSelectedId(null);
     setDetail(null);
     setEvents([]);
+    setActivityEvents([]);
+    setActivityBefore(null);
+    setActivityAtNewest(true);
     setMessages(null);
     setDiff(null);
     setStreamAfter(null);
     void loadTasks();
+  };
+
+  const loadOlderActivity = async () => {
+    if (!selectedId || activityBefore === null || loadingOlder) return;
+    setLoadingOlder(true);
+    try {
+      const page = await api.getActivityPage(selectedId, activityBefore);
+      if (selectedRef.current !== selectedId) return;
+      setActivityEvents((current) => {
+        const combined = [...new Map([...current, ...page.items].map((item) => [item.sequence_id, item])).values()]
+          .sort((left, right) => right.sequence_id - left.sequence_id);
+        if (combined.length > ACTIVITY_DOM_LIMIT) {
+          setActivityAtNewest(false);
+          return combined.slice(-ACTIVITY_DOM_LIMIT);
+        }
+        return combined;
+      });
+      setActivityBefore(page.next_before_sequence);
+    } catch (reason) {
+      setError(message(reason));
+    } finally {
+      setLoadingOlder(false);
+    }
+  };
+
+  const returnToNewestActivity = async () => {
+    if (!selectedId) return;
+    try {
+      const page = await api.getActivityPage(selectedId);
+      if (selectedRef.current !== selectedId) return;
+      setActivityEvents(page.items);
+      setActivityBefore(page.next_before_sequence);
+      setActivityAtNewest(true);
+    } catch (reason) {
+      setError(message(reason));
+    }
   };
 
   return (
@@ -390,7 +459,16 @@ function App({ user, onSignOut }: AppProps) {
                     <DiffTab diff={diff} workspaceExists={detail.workspace_id !== null} />
                   )}
                   {tab === "Tests" && <TestsTab events={events} />}
-                  {tab === "Activity" && <TraceTab events={events} />}
+                  {tab === "Activity" && (
+                    <ActivityTab
+                      events={activityEvents}
+                      hasOlder={activityBefore !== null}
+                      loadingOlder={loadingOlder}
+                      atNewest={activityAtNewest}
+                      onLoadOlder={() => void loadOlderActivity()}
+                      onReturnNewest={() => void returnToNewestActivity()}
+                    />
+                  )}
                   {tab === "Summary" && <SummaryTab detail={detail} messages={messages} diff={diff} />}
                   {tab === "Workspace" && <WorkspaceTab detail={detail} />}
                 </div>

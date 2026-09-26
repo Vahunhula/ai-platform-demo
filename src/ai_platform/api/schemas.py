@@ -115,6 +115,7 @@ class TaskListItem(BaseModel):
     workflow_phase: WorkflowPhase
     model_tier: str | None
     writer: str | None
+    disposition: Literal["CONFIRMED", "DEFERRED"] | None
     updated_at: datetime
 
 
@@ -247,6 +248,17 @@ class EventResponse(BaseModel):
     actor_display_name: str
     execution_id: str | None
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class EventPageResponse(BaseModel):
+    """A bounded Activity-history page; SSE continues to use EventResponse."""
+
+    items: list[EventResponse]
+    order: Literal["asc", "desc"]
+    limit: int
+    has_more: bool
+    next_before_sequence: int | None = None
+    next_after_sequence: int | None = None
 
 
 class DiffResponse(BaseModel):

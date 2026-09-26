@@ -113,53 +113,53 @@ export function TestsTab({ events }: { events: PlatformEvent[] }) {
   );
 }
 
-const ACTIVITY_PAGE_SIZE = 40;
-
-export function TraceTab({ events }: { events: PlatformEvent[] }) {
-  const [newestFirst, setNewestFirst] = useState(true);
-  const [visibleCount, setVisibleCount] = useState(ACTIVITY_PAGE_SIZE);
-
-  // A newly loaded task, or a freshly opened stream, starts back at the latest page.
-  useEffect(() => setVisibleCount(ACTIVITY_PAGE_SIZE), [events.length === 0]);
-
+export function ActivityTab({
+  events,
+  hasOlder = false,
+  loadingOlder = false,
+  atNewest = true,
+  onLoadOlder,
+  onReturnNewest,
+}: {
+  events: PlatformEvent[];
+  hasOlder?: boolean;
+  loadingOlder?: boolean;
+  atNewest?: boolean;
+  onLoadOlder?: () => void;
+  onReturnNewest?: () => void;
+}) {
   if (!events.length) return <Empty text="No events recorded yet." />;
-  // Sequence numbers are the durable, monotonically increasing source of truth;
-  // this only reorders how the list is presented, never the events themselves.
-  const ordered = newestFirst ? [...events].reverse() : events;
-  const visible = ordered.slice(0, visibleCount);
-  const hasMore = visibleCount < ordered.length;
+  const ordered = [...events].sort((left, right) => right.sequence_id - left.sequence_id);
   return (
     <div className="event-list">
       <div className="tab-note activity-controls">
         <span>
-          {events.length} public platform events. Model reasoning is never recorded here.
+          {events.length} loaded public platform events, newest first. Model reasoning is never recorded here.
         </span>
-        <button
-          type="button"
-          className="link-button"
-          onClick={() => setNewestFirst((value) => !value)}
-        >
-          {newestFirst ? "Showing newest first" : "Showing oldest first"} · switch
-        </button>
+        {!atNewest && onReturnNewest && (
+          <button type="button" className="link-button" onClick={onReturnNewest}>
+            Return to newest
+          </button>
+        )}
       </div>
-      {visible.map((event) => (
-        <TraceEvent event={event} key={event.sequence_id} />
+      {ordered.map((event) => (
+        <ActivityEvent event={event} key={event.sequence_id} />
       ))}
-      {hasMore && (
+      {hasOlder && onLoadOlder && (
         <button
           type="button"
           className="link-button load-more"
-          onClick={() => setVisibleCount((count) => count + ACTIVITY_PAGE_SIZE)}
+          onClick={onLoadOlder}
+          disabled={loadingOlder}
         >
-          Load {Math.min(ACTIVITY_PAGE_SIZE, ordered.length - visibleCount)}{" "}
-          {newestFirst ? "older" : "newer"} events
+          {loadingOlder ? "Loading…" : "Load older events"}
         </button>
       )}
     </div>
   );
 }
 
-function TraceEvent({ event }: { event: PlatformEvent }) {
+function ActivityEvent({ event }: { event: PlatformEvent }) {
   const [open, setOpen] = useState(false);
   const summary = summarizeEvent(event);
   const hasMetadata = Object.keys(event.metadata).length > 0;

@@ -33,7 +33,9 @@ export function TaskSidebar({ tasks, selectedId, onSelect, onNewTask, canCreate 
             </span>
             <span className="task-title">{task.title}</span>
             <span className="difficulty">
-              {task.difficulty} difficulty
+              {task.status === "COMPLETED" && task.disposition
+                ? `Completed · ${task.disposition === "CONFIRMED" ? "Confirmed" : "Deferred"}`
+                : `${task.difficulty} difficulty`}
               {task.model_tier && ` · ${task.model_tier}`}
               {task.writer && ` · writer: ${task.writer}`}
             </span>

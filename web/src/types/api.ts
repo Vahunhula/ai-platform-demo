@@ -68,6 +68,7 @@ export interface TaskListItem {
   workflow_phase: "BRAINSTORM" | "PLAN" | "IMPLEMENTATION" | "REVIEW" | "HUMAN_REVIEW";
   model_tier: string | null;
   writer: string | null;
+  disposition: "CONFIRMED" | "DEFERRED" | null;
   updated_at: string;
 }
 
@@ -124,7 +125,6 @@ export interface TaskDetail extends TaskListItem {
   created_at: string;
   default_model_selection: LogicalModel;
   latest_readiness: ReadinessSummary | null;
-  disposition: "CONFIRMED" | "DEFERRED" | null;
   can_remove: boolean;
   remove_disabled_reason: string | null;
   repository_id: string | null;
@@ -177,6 +177,15 @@ export interface PlatformEvent {
   actor_display_name: string;
   execution_id: string | null;
   metadata: Record<string, unknown>;
+}
+
+export interface EventPage {
+  items: PlatformEvent[];
+  order: "asc" | "desc";
+  limit: number;
+  has_more: boolean;
+  next_before_sequence: number | null;
+  next_after_sequence: number | null;
 }
 
 export interface DiffResponse {

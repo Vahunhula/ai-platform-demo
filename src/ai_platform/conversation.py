@@ -177,14 +177,16 @@ class ConversationService:
     def list_messages(self, task_id: str) -> list[ConversationEntry]:
         """Return the durable conversation in event-sequence order."""
 
-        session = self.sessions.get_session(task_id)
+        task = self.sessions.get_definition(task_id)
+        events = self.storage.get_events(task.id)
         deliveries = {
             message.event_sequence_id: message
-            for message in self.storage.list_queued_messages(session.definition.id)
+            for message in self.storage.list_queued_messages(task.id)
         }
         return [
             ConversationEntry(event, deliveries.get(event.sequence_id or 0))
-            for event in session.conversation
+            for event in events
+            if event.event_type in {EventType.HUMAN_MESSAGE, EventType.AGENT_MESSAGE}
         ]
 
     def list_chat_items(self, task_id: str) -> list[ChatItem]:
@@ -192,12 +194,13 @@ class ConversationService:
 
         Everything a human needs to read or respond to (phase output, a
         waiting-for-human question, a command's result) belongs here so Chat
-        never requires a trip to Activity/Trace; low-level diagnostics stay
+        never requires a trip to Activity; low-level diagnostics stay
         out of this projection and remain Activity-only.
         """
 
-        session = self.sessions.get_session(task_id)
-        task_id = session.definition.id
+        task = self.sessions.get_definition(task_id)
+        task_id = task.id
+        events = self.storage.get_events(task_id)
         deliveries = {
             message.event_sequence_id: message
             for message in self.storage.list_queued_messages(task_id)
@@ -209,7 +212,7 @@ class ConversationService:
         evaluations_by_phase: dict[WorkflowPhase, list[ChecklistEvaluation]] = {}
         for evaluation in self.storage.list_checklist_evaluations(task_id):
             evaluations_by_phase.setdefault(evaluation.phase, []).append(evaluation)
-        return _build_chat_items(session.events, deliveries, artifacts_by_id, evaluations_by_phase)
+        return _build_chat_items(events, deliveries, artifacts_by_id, evaluations_by_phase)
 
     def submit(
         self,

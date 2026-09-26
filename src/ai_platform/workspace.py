@@ -244,8 +244,11 @@ class LocalWorkspaceProvider(WorkspaceProvider):
         return changes
 
     def destroy(self, task_id: str) -> None:
-        workspace = self.get_path(task_id).resolve()
-        if workspace.parent != self.root:
+        candidate = self.get_path(task_id)
+        if candidate.is_symlink():
+            raise WorkspaceError("Refusing to remove a symlinked workspace")
+        workspace = candidate.resolve()
+        if workspace != candidate or workspace.parent != self.root:
             raise WorkspaceError("Refusing to remove a path outside the workspace root")
         if (
             workspace == self.source_repository
@@ -259,6 +262,8 @@ class LocalWorkspaceProvider(WorkspaceProvider):
 
     def _existing_workspace(self, task_id: str) -> Path:
         workspace = self.get_path(task_id)
+        if workspace.is_symlink() or workspace.resolve().parent != self.root:
+            raise WorkspaceError("Refusing to use a symlinked or escaped workspace")
         if not workspace.is_dir():
             raise WorkspaceError(f"No workspace exists for {task_id}")
         return workspace

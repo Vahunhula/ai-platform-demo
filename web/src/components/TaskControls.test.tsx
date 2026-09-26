@@ -75,7 +75,7 @@ describe("permanent task removal", () => {
     expect(onRemoved).toHaveBeenCalledOnce();
   });
 
-  it("does not render removal when backend availability is false", () => {
+  it("keeps removal discoverable and explains backend unavailability", () => {
     render(
       <TaskControls
         detail={{ ...detail, can_remove: false, remove_disabled_reason: "Not terminal" }}
@@ -83,6 +83,72 @@ describe("permanent task removal", () => {
         onRemoved={vi.fn()}
       />,
     );
-    expect(screen.queryByRole("button", { name: "Remove task…" })).toBeNull();
+    expect((screen.getByRole("button", { name: "Remove task…" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByText("Disabled — Not terminal")).toBeTruthy();
+  });
+
+  it("shows Confirm and Defer in Human Review while removal remains disabled", () => {
+    const actions = { ...detail.actions };
+    actions.approve = { allowed: true, reason: null };
+    actions.defer = { allowed: true, reason: null };
+    render(
+      <TaskControls
+        detail={{
+          ...detail,
+          status: "WAITING_FOR_HUMAN",
+          disposition: null,
+          can_remove: false,
+          remove_disabled_reason: "Confirm or Defer the task in Human Review first.",
+          actions,
+        }}
+        onChanged={vi.fn()}
+        onRemoved={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Confirm" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Defer…" })).toBeTruthy();
+    expect((screen.getByRole("button", { name: "Remove task…" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByText(/Confirm or Defer the task/)).toBeTruthy();
+  });
+
+  it.each(["CONFIRMED", "DEFERRED"] as const)(
+    "enables removal for a terminal %s task",
+    (disposition) => {
+      render(
+        <TaskControls
+          detail={{ ...detail, disposition, can_remove: true, remove_disabled_reason: null }}
+          onChanged={vi.fn()}
+          onRemoved={vi.fn()}
+        />,
+      );
+      expect((screen.getByRole("button", { name: "Remove task…" }) as HTMLButtonElement).disabled).toBe(false);
+    },
+  );
+
+  it("cancels permanent removal without calling DELETE", () => {
+    render(<TaskControls detail={detail} onChanged={vi.fn()} onRemoved={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "Remove task…" }));
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(mocks.removeTask).not.toHaveBeenCalled();
+  });
+
+  it("shows a read-only reason for viewers and never opens the dialog", () => {
+    render(
+      <TaskControls
+        detail={{
+          ...detail,
+          can_remove: false,
+          remove_disabled_reason: "Developer access is required to remove a task.",
+        }}
+        onChanged={vi.fn()}
+        onRemoved={vi.fn()}
+      />,
+    );
+    const button = screen.getByRole("button", { name: "Remove task…" }) as HTMLButtonElement;
+    expect(button.disabled).toBe(true);
+    fireEvent.click(button);
+    expect(screen.queryByRole("dialog")).toBeNull();
   });
 });
