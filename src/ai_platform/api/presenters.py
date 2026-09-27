@@ -92,11 +92,26 @@ def _render_artifact_body(kind: ArtifactKind, payload: dict[str, Any]) -> str:
             + _bulleted("Open questions", payload.get("open_questions", []))
         )
     if kind is ArtifactKind.IMPLEMENTATION_SUMMARY:
+        canonical = payload.get("canonical_verification")
+        source_commit = payload.get("source_commit")
+        provenance = "Provider-authored narrative; canonical facts follow."
+        if source_commit:
+            provenance += f"\n\nSource commit\n- {source_commit}"
         return (
-            str(payload.get("summary", ""))
-            + _bulleted("Changed", payload.get("files_changed", []))
-            + _bulleted("Verification", payload.get("tests_run", []))
-            + _bulleted("Known issues", payload.get("known_issues", []))
+            "Implementation Summary\n\nImplementation notes (descriptive)\n"
+            + provenance
+            + f"\n\n{str(payload.get('summary', ''))}"
+            + _bulleted("Changed files (platform-generated)", payload.get("files_changed", []))
+            + _bulleted("Verification (platform-generated)", payload.get("tests_run", []))
+            + _bulleted(
+                "Provider-reported considerations", payload.get("known_issues", [])
+            )
+            + (
+                "\n\nCanonical verification event\n"
+                f"- Sequence: {canonical.get('event_sequence_id')}"
+                if isinstance(canonical, dict) and canonical.get("event_sequence_id")
+                else ""
+            )
         )
     if kind is ArtifactKind.REVIEW_REPORT:
         assessments = [

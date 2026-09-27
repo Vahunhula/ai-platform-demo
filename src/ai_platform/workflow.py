@@ -68,11 +68,35 @@ class PlanPayload(_ArtifactPayload):
     open_questions: list[NonBlank]
 
 
+class CanonicalVerificationPayload(_ArtifactPayload):
+    """Platform-owned verification facts attached after the provider turn.
+
+    These fields are never trusted from model output. The task graph replaces
+    any provider-supplied value with the latest persisted verifier event before
+    the Implementation Summary is stored.
+    """
+
+    status: Literal["PASS", "FAIL"]
+    event_sequence_id: int | None = Field(default=None, ge=1)
+    mode: str | None = None
+    command: list[str] = Field(default_factory=list)
+    task_specific_passed: bool | None = None
+    task_specific_passed_tests: int | None = Field(default=None, ge=0)
+    broad_regression_passed: bool | None = None
+    known_baseline_failures: int = Field(default=0, ge=0)
+    new_regressions: int = Field(default=0, ge=0)
+    pre_existing_failures: list[NonBlank] = Field(default_factory=list)
+    new_failures: list[NonBlank] = Field(default_factory=list)
+    infrastructure_error: str | None = Field(default=None, max_length=20_000)
+
+
 class ImplementationSummaryPayload(_ArtifactPayload):
     summary: NonBlank
     files_changed: list[NonBlank]
     tests_run: list[NonBlank]
     known_issues: list[NonBlank]
+    canonical_verification: CanonicalVerificationPayload | None = None
+    source_commit: str | None = Field(default=None, max_length=200)
 
 
 class ReviewReportPayload(_ArtifactPayload):

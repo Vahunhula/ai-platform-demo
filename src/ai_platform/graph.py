@@ -338,6 +338,17 @@ def _build_graph(
                 else VerificationStatus.NOT_RUN.value
             ),
             workspace_diff=workspace_provider.get_diff(task.id)[-_MAX_EVENT_OUTPUT:],
+            canonical_changed_files=(
+                [change.path for change in workspace_provider.get_changed_files(task.id)]
+                if phase is WorkflowPhase.REVIEW
+                else []
+            ),
+            canonical_verification=(
+                _canonical_verification_evidence(storage, task.id)
+                if phase is WorkflowPhase.REVIEW
+                else {}
+            ),
+            source_commit=(baseline_context.source_commit if baseline_context else None),
             upstream_artifacts=upstream,
             output_schema=artifact_json_schema(kind),
             cancellation_requested=lambda: storage.is_pause_requested(task.id),
@@ -840,6 +851,7 @@ def _build_graph(
     def implementation_gate(state: TaskGraphState) -> TaskGraphState:
         files_changed = [change.path for change in workspace_provider.get_changed_files(task.id)]
         verification_passed = bool(state.get("verification_passed"))
+        canonical_verification = _canonical_verification_evidence(storage, task.id)
         known_issues = state.get("implementation_known_issues", [])
         structured_valid = bool(state.get("implementation_structured_valid"))
         results = _implementation_checklist(
@@ -858,11 +870,12 @@ def _build_graph(
                 {
                     "summary": summary_text[:20000],
                     "files_changed": files_changed,
-                    "tests_run": [
-                        f"{' '.join(build_verification_command(task))}: "
-                        f"{'passed' if verification_passed else 'failed'}"
-                    ],
+                    "tests_run": _canonical_verification_lines(canonical_verification),
                     "known_issues": known_issues,
+                    "canonical_verification": canonical_verification,
+                    "source_commit": (
+                        baseline_context.source_commit if baseline_context else None
+                    ),
                 },
             )
             artifact = storage.create_workflow_artifact(
@@ -1088,6 +1101,72 @@ def _upstream_artifacts(
         for artifact in storage.list_workflow_artifacts(task_id, current_only=True)
     }
     return {kind.value: current[kind] for kind in kinds if kind in current}
+
+
+def _canonical_verification_evidence(
+    storage: SQLiteStorage, task_id: str
+) -> dict[str, object]:
+    """Return the latest persisted verifier event as bounded machine facts.
+
+    Absence or malformed/incomplete verifier evidence fails closed. This helper
+    never infers truth from an agent artifact or natural-language summary.
+    """
+
+    for event in reversed(storage.get_events(task_id)):
+        if event.event_type not in {EventType.TEST_PASSED, EventType.TEST_FAILED}:
+            continue
+        metadata = event.metadata
+        error = metadata.get("error")
+        return {
+            "status": "PASS" if event.event_type is EventType.TEST_PASSED else "FAIL",
+            "event_sequence_id": event.sequence_id,
+            "mode": metadata.get("verification_mode"),
+            "command": [str(item) for item in metadata.get("command", [])],
+            "task_specific_passed": metadata.get("task_specific_passed"),
+            "task_specific_passed_tests": metadata.get("task_specific_passed_tests"),
+            "broad_regression_passed": metadata.get("broad_regression_passed"),
+            "known_baseline_failures": int(metadata.get("baseline_warning_count", 0)),
+            "new_regressions": int(metadata.get("new_regression_count", 0)),
+            "pre_existing_failures": [
+                str(item) for item in metadata.get("pre_existing_failures", [])
+            ],
+            "new_failures": [str(item) for item in metadata.get("new_failures", [])],
+            "infrastructure_error": str(error) if error else None,
+        }
+    return {
+        "status": "FAIL",
+        "event_sequence_id": None,
+        "mode": None,
+        "command": [],
+        "task_specific_passed": None,
+        "task_specific_passed_tests": None,
+        "broad_regression_passed": None,
+        "known_baseline_failures": 0,
+        "new_regressions": 0,
+        "pre_existing_failures": [],
+        "new_failures": [],
+        "infrastructure_error": "No persisted verification result is available.",
+    }
+
+
+def _canonical_verification_lines(evidence: dict[str, object]) -> list[str]:
+    """Render concise factual lines for the user-facing artifact."""
+
+    lines = [f"Platform verification: {evidence['status']}"]
+    task_passed = evidence.get("task_specific_passed")
+    task_count = evidence.get("task_specific_passed_tests")
+    if task_passed is not None:
+        detail = "PASS" if task_passed else "FAIL"
+        if isinstance(task_count, int):
+            detail += f" ({task_count} passed)"
+        lines.append(f"Focused/task verification: {detail}")
+    lines.append(
+        f"Known baseline failures: {evidence.get('known_baseline_failures', 0)} unchanged"
+    )
+    lines.append(f"New regressions: {evidence.get('new_regressions', 0)}")
+    if evidence.get("infrastructure_error"):
+        lines.append(f"Verification infrastructure: {evidence['infrastructure_error']}")
+    return lines
 
 
 def _persist_gate(

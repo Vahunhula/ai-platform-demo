@@ -257,6 +257,14 @@ Instructions:
         brainstorm = request.upstream_artifacts.get("BRAINSTORM_SUMMARY")
         plan = request.upstream_artifacts.get("PLAN")
         implementation_summary = request.upstream_artifacts.get("IMPLEMENTATION_SUMMARY")
+        implementation_notes = (
+            str(implementation_summary.get("summary", ""))
+            if implementation_summary
+            else "<none available>"
+        )
+        implementation_considerations = (
+            implementation_summary.get("known_issues", []) if implementation_summary else []
+        )
         repair = self._repair_notice(request)
         return f"""Task: {request.task.id}
 Title: {request.task.title}
@@ -273,18 +281,34 @@ Latest Brainstorm Summary:
 Latest Plan:
 {self._format_artifact(plan)}
 
-Latest Implementation Summary:
-{self._format_artifact(implementation_summary)}
+NON-AUTHORITATIVE implementation narrative (descriptive only):
+{implementation_notes}
 
-Deterministic verification result: {request.current_verification}
+NON-AUTHORITATIVE provider-reported considerations:
+{self._format_artifact({"known_issues": implementation_considerations})}
+
+AUTHORITATIVE changed files (derived from the current workspace):
+{self._format_artifact({"files": request.canonical_changed_files})}
+
+AUTHORITATIVE persisted verification evidence:
+{self._format_artifact(request.canonical_verification)}
+
+AUTHORITATIVE source/base commit:
+{request.source_commit or "<legacy task: not available>"}
 
 Actual current workspace Diff (may be truncated):
 {request.workspace_diff[-8000:] or "<no changes>"}
 {repair}
 Instructions:
 - This is the REVIEW phase: a fresh, independent review. You have not seen
-  any prior implementation conversation; judge only the requirements, plan,
-  summary, diff, and verification result above.
+  any prior implementation conversation.
+- Evidence hierarchy is strict: original requirements, Plan, actual diff,
+  platform-derived changed files, persisted verification evidence, baseline
+  comparison, and test results are authoritative. The implementation narrative
+  and provider-reported considerations are descriptive and non-authoritative.
+- Never create a finding solely because descriptive provider prose contradicts
+  authoritative machine evidence. Use the machine evidence for all file,
+  command, test, baseline, regression, verification, and source-commit facts.
 - You are READ-ONLY: inspect the repository (Read, Glob, Grep only) to check
   conventions and correctness. Do not edit, write, or run any mutating
   command.
@@ -362,8 +386,12 @@ Instructions:
 - Run the relevant tests after the change if practical: python -m pytest {targets}
 - Do not commit or push.
 - Stop after implementation and verification.
-- Report what changed and what verification was run, and any known issues,
-  as the required Implementation Summary JSON.
+- In the Implementation Summary, keep `summary` to implementation/design notes.
+  Do not claim test status, changed-file facts, commands, baseline counts, or
+  regression counts there; the platform supplies those authoritative fields.
+- Report any provider-observed considerations in `known_issues`. The platform
+  replaces `files_changed`, `tests_run`, canonical verification, and source
+  commit fields before persistence.
 """
 
     @staticmethod

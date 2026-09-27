@@ -51,6 +51,11 @@ class ExecutionRequest(BaseModel):
     recent_agent_messages: list[str] = Field(default_factory=list)
     current_verification: str = "not_run"
     workspace_diff: str = ""
+    # Platform-owned evidence for Review. Provider prose and legacy artifacts
+    # are descriptive only and cannot replace these facts.
+    canonical_changed_files: list[str] = Field(default_factory=list)
+    canonical_verification: dict[str, Any] = Field(default_factory=dict)
+    source_commit: str | None = None
     human_workspace_changed: bool = False
     # Phase 3: structured, bounded phase context (never the raw prior-phase transcript).
     upstream_artifacts: dict[str, dict[str, Any]] = Field(default_factory=dict)
