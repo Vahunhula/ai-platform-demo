@@ -57,8 +57,15 @@ class BroadRegressionVerification(BaseModel):
     infrastructure_error: str | None = None
 
 
+class TaskAcceptanceVerification(BaseModel):
+    status: str
+    targets: list[str]
+    failures: list[str] = Field(default_factory=list)
+
+
 class BaselineAwareVerificationResult(BaseModel):
     task_specific: TaskSpecificVerification
+    task_acceptance: TaskAcceptanceVerification
     broad_regression: BroadRegressionVerification
     passed: bool
     warnings: list[str]
@@ -151,8 +158,9 @@ def verify_registered_task(
 
     broad_targets = task.verification.targets
     explicit_narrow = broad_targets != ["tests"]
+    owned_targets = sorted(set(task_owned_targets or []))
     task_targets = sorted(
-        set(task_owned_targets or [])
+        set(owned_targets)
         | (
             set(broad_targets)
             if explicit_narrow
@@ -192,6 +200,23 @@ def verify_registered_task(
         passed_tests=task_run.passed_tests if task_run else 0,
         infrastructure_error=task_run.infrastructure_error if task_run else None,
     )
+    acceptance_failures = [
+        failure
+        for failure in (task_run.failures if task_run else [])
+        if any(failure.startswith(f"{target}::") for target in owned_targets)
+    ]
+    acceptance_status = (
+        "NOT_PROVIDED"
+        if not owned_targets
+        else "FAIL"
+        if acceptance_failures or (task_run and task_run.infrastructure_error)
+        else "PASS"
+    )
+    task_acceptance = TaskAcceptanceVerification(
+        status=acceptance_status,
+        targets=owned_targets,
+        failures=acceptance_failures,
+    )
     broad = BroadRegressionVerification(
         baseline_identity=identity,
         baseline_failures=sorted(baseline_failures),
@@ -210,6 +235,7 @@ def verify_registered_task(
         blocking.append(infrastructure)
     return BaselineAwareVerificationResult(
         task_specific=task_specific,
+        task_acceptance=task_acceptance,
         broad_regression=broad,
         passed=task_passed and broad_passed,
         warnings=[f"Pre-existing baseline failure: {item}" for item in pre_existing],

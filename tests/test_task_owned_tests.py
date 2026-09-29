@@ -1,6 +1,7 @@
 """Demo 2.5.2 task-owned test isolation, synthesis, upload, and cleanup regressions."""
 
 import dataclasses
+import sqlite3
 import subprocess
 from pathlib import Path
 
@@ -85,6 +86,16 @@ def test_uploaded_test_is_task_owned_isolated_and_deleted(tmp_path: Path) -> Non
     assert not (source / relative).exists()
     stored = context.storage.list_task_test_files(task_a.task_id)
     assert len(stored) == 1 and stored[0].source is FileSource.UPLOADED
+    context.sessions.start(
+        task_a.task_id,
+        HumanIdentity(actor_id=actor.user_id, display_name=actor.display_name),
+    )
+    verification = [
+        event
+        for event in context.storage.get_events(task_a.task_id)
+        if event.event_type.value == "TEST_PASSED"
+    ][-1]
+    assert verification.metadata["task_acceptance_status"] == "PASS"
 
     with context.storage.transaction(immediate=True) as connection:
         connection.execute(
@@ -158,6 +169,21 @@ class SynthesisExecutor(FakeAgentExecutor):
         return super().execute(request)
 
 
+class NeedsHumanSynthesisExecutor(FakeAgentExecutor):
+    def execute(self, request: ExecutionRequest) -> ExecutionResult:
+        if request.test_synthesis_stories:
+            return ExecutionResult(
+                succeeded=True,
+                summary="Fixture details are missing",
+                structured_output={
+                    "status": "NEEDS_HUMAN",
+                    "message": "Which fixture supplies negative values?",
+                    "requirement_mapping": {},
+                },
+            )
+        return super().execute(request)
+
+
 def test_human_story_synthesizes_and_verifies_only_in_own_task(tmp_path: Path) -> None:
     executor = SynthesisExecutor()
     context, app, repository, actor, source = _setup(tmp_path, executor)
@@ -181,6 +207,35 @@ def test_human_story_synthesizes_and_verifies_only_in_own_task(tmp_path: Path) -
     assert not (source / path).exists()
     record = context.storage.get_task(task.task_id)
     assert record is not None and record.verification_status.value == "passed"
+    verification = [
+        event
+        for event in context.storage.get_events(task.task_id)
+        if event.event_type.value == "TEST_PASSED"
+    ][-1]
+    assert verification.metadata["task_acceptance_status"] == "PASS"
+    assert verification.metadata["task_acceptance_targets"] == [generated[0].relative_path]
+
+
+def test_unclear_story_stops_with_needs_human_reason(tmp_path: Path) -> None:
+    context, app, repository, actor, _source = _setup(tmp_path, NeedsHumanSynthesisExecutor())
+    task = app.state.task_creation.create(
+        _command(
+            repository.id,
+            actor.user_id,
+            acceptance_test_stories="Negative values are rejected.",
+        ),
+        actor,
+    )
+    context.sessions.start(
+        task.task_id,
+        HumanIdentity(actor_id=actor.user_id, display_name=actor.display_name),
+    )
+    specification = context.storage.get_test_specification(task.task_id)
+    assert specification is not None
+    assert specification.generation_status.value == "NEEDS_HUMAN"
+    assert specification.generation_message == "Which fixture supplies negative values?"
+    assert context.storage.list_task_test_files(task.task_id) == []
+    assert context.storage.get_task(task.task_id).status is TaskStatus.WAITING_FOR_HUMAN
 
 
 def test_disposable_system_task_cleanup_does_not_weaken_user_task(tmp_path: Path) -> None:
@@ -200,9 +255,47 @@ def test_disposable_system_task_cleanup_does_not_weaken_user_task(tmp_path: Path
     )
     assert removal.availability(context.storage.get_task(disposable.task_id), actor).allowed
     assert not removal.availability(context.storage.get_task(user_task.task_id), actor).allowed
+    context.sessions.start(
+        disposable.task_id,
+        HumanIdentity(actor_id=actor.user_id, display_name=actor.display_name),
+    )
     removal.remove(disposable.task_id, actor)
     assert context.storage.get_task(disposable.task_id) is None
     assert context.storage.get_task(user_task.task_id) is not None
+    assert context.storage.get_events(user_task.task_id)
+    assert not context.workspaces.get_path(disposable.task_id).exists()
+    with sqlite3.connect(context.settings.checkpoint_db_path) as connection:
+        for table in ("checkpoints", "writes"):
+            assert (
+                connection.execute(
+                    f"SELECT COUNT(*) FROM {table} WHERE thread_id = ?", (disposable.task_id,)
+                ).fetchone()[0]
+                == 0
+            )
+        assert connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+
+
+def test_disposable_cleanup_runs_after_smoke_exception(tmp_path: Path) -> None:
+    context, app, repository, actor, _source = _setup(tmp_path)
+    disposable = app.state.task_creation.create(
+        _command(
+            repository.id,
+            actor.user_id,
+            origin=TaskOrigin.SYSTEM_TEST,
+            disposable=True,
+        ),
+        actor,
+    )
+    removal = TaskRemovalService(
+        context.storage, context.workspaces, context.settings.checkpoint_db_path
+    )
+    with pytest.raises(RuntimeError, match="halfway"):
+        try:
+            raise RuntimeError("halfway through smoke")
+        finally:
+            removal.remove(disposable.task_id, actor)
+    assert context.storage.get_task(disposable.task_id) is None
+    assert not context.workspaces.get_path(disposable.task_id).exists()
 
 
 def test_clean_shared_baseline_does_not_leak_obsolete_demo_tests(tmp_path: Path) -> None:

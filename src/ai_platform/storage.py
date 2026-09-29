@@ -1549,6 +1549,29 @@ class SQLiteStorage:
         with self._connect(immediate=True) as connection:
             self._insert_task_test_file(connection, test_file)
 
+    def complete_test_generation(
+        self, task_id: str, files: list[TaskTestFile], message: str
+    ) -> None:
+        """Atomically persist every derived file and mark synthesis complete."""
+
+        with self._connect(immediate=True) as connection:
+            for test_file in files:
+                if test_file.task_id != task_id:
+                    raise ValueError("Generated test belongs to another task")
+                self._insert_task_test_file(connection, test_file)
+            cursor = connection.execute(
+                "UPDATE task_test_specifications SET generation_status = ?, "
+                "generation_message = ? WHERE task_id = ? AND generation_status = ?",
+                (
+                    TestGenerationStatus.GENERATED.value,
+                    message[:2000],
+                    task_id,
+                    TestGenerationStatus.PENDING.value,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("Test generation state changed concurrently")
+
     def update_test_generation(
         self, task_id: str, status: TestGenerationStatus, message: str | None = None
     ) -> None:

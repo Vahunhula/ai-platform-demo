@@ -82,6 +82,8 @@ class CanonicalVerificationPayload(_ArtifactPayload):
     command: list[str] = Field(default_factory=list)
     task_specific_passed: bool | None = None
     task_specific_passed_tests: int | None = Field(default=None, ge=0)
+    task_acceptance_status: Literal["PASS", "FAIL", "NOT_PROVIDED"] = "NOT_PROVIDED"
+    task_acceptance_targets: list[NonBlank] = Field(default_factory=list)
     broad_regression_passed: bool | None = None
     known_baseline_failures: int = Field(default=0, ge=0)
     new_regressions: int = Field(default=0, ge=0)

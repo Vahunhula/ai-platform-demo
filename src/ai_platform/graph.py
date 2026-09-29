@@ -557,6 +557,26 @@ def _build_graph(
         }
 
     def synthesize_tests(state: TaskGraphState) -> TaskGraphState:
+        def needs_human(message: str) -> TaskGraphState:
+            storage.update_test_generation(
+                task.id, TestGenerationStatus.NEEDS_HUMAN, message[:2000]
+            )
+            storage.append_event(
+                Event(
+                    task_id=task.id,
+                    event_type=EventType.WORKFLOW_PHASE_WAITING_FOR_HUMAN,
+                    actor_type=ActorType.SYSTEM,
+                    actor_id="test-synthesis",
+                    metadata={
+                        "phase": WorkflowPhase.IMPLEMENTATION.value,
+                        "execution_id": execution_id,
+                        "blocking_needs_human": ["test_synthesis"],
+                        "message": message[:2000],
+                    },
+                )
+            )
+            return {"test_synthesis_ready": False}
+
         specification = storage.get_test_specification(task.id)
         if (
             specification is None
@@ -603,13 +623,11 @@ def _build_graph(
                 files = [path for path in candidates if path.is_file() and not path.is_symlink()]
                 if payload.get("status") != "GENERATED" or not files:
                     message = str(payload.get("message") or result.error or result.summary)
-                    storage.update_test_generation(
-                        task.id, TestGenerationStatus.NEEDS_HUMAN, message[:2000]
-                    )
-                    return {"test_synthesis_ready": False}
+                    return needs_human(message)
                 mapping = payload.get("requirement_mapping")
                 if not isinstance(mapping, dict):
                     mapping = {}
+                generated_records = []
                 for source in files:
                     relative_generated = source.relative_to(generated_root)
                     if len(relative_generated.parts) != 1:
@@ -623,7 +641,7 @@ def _build_graph(
                     destination = workspace / relative
                     destination.parent.mkdir(parents=True, exist_ok=True)
                     destination.write_text(content, encoding="utf-8")
-                    storage.add_task_test_file(
+                    generated_records.append(
                         TaskTestFile(
                             file_id=f"testfile_{uuid4().hex}",
                             task_id=task.id,
@@ -639,15 +657,12 @@ def _build_graph(
                             },
                         )
                     )
-                storage.update_test_generation(
-                    task.id, TestGenerationStatus.GENERATED, str(payload.get("message") or "")
+                storage.complete_test_generation(
+                    task.id, generated_records, str(payload.get("message") or "")
                 )
                 return {"test_synthesis_ready": True}
         except Exception as error:
-            storage.update_test_generation(
-                task.id, TestGenerationStatus.NEEDS_HUMAN, _safe_error(error)
-            )
-            return {"test_synthesis_ready": False}
+            return needs_human(_safe_error(error))
 
     def escalate_model(state: TaskGraphState) -> TaskGraphState:
         previous = _selection_from_state(state)
@@ -864,6 +879,8 @@ def _build_graph(
                 )
                 verification_metadata = {
                     "verification_mode": "LEGACY_EXPLICIT",
+                    "task_acceptance_status": "NOT_PROVIDED",
+                    "task_acceptance_targets": [],
                     "task_specific_passed": result.passed,
                     "task_specific_passed_tests": None,
                     "pre_existing_failures": [],
@@ -889,6 +906,8 @@ def _build_graph(
                 result.passed = combined.passed
                 verification_metadata = {
                     "verification_mode": "BASELINE_AWARE",
+                    "task_acceptance_status": combined.task_acceptance.status,
+                    "task_acceptance_targets": combined.task_acceptance.targets,
                     "task_specific_targets": combined.task_specific.targets,
                     "task_specific_passed": combined.task_specific.passed,
                     "task_specific_passed_tests": combined.task_specific.passed_tests,
@@ -1235,6 +1254,8 @@ def _canonical_verification_evidence(storage: SQLiteStorage, task_id: str) -> di
             "command": [str(item) for item in metadata.get("command", [])],
             "task_specific_passed": metadata.get("task_specific_passed"),
             "task_specific_passed_tests": metadata.get("task_specific_passed_tests"),
+            "task_acceptance_status": metadata.get("task_acceptance_status", "NOT_PROVIDED"),
+            "task_acceptance_targets": metadata.get("task_acceptance_targets", []),
             "broad_regression_passed": metadata.get("broad_regression_passed"),
             "known_baseline_failures": int(metadata.get("baseline_warning_count", 0)),
             "new_regressions": int(metadata.get("new_regression_count", 0)),
@@ -1251,6 +1272,8 @@ def _canonical_verification_evidence(storage: SQLiteStorage, task_id: str) -> di
         "command": [],
         "task_specific_passed": None,
         "task_specific_passed_tests": None,
+        "task_acceptance_status": "NOT_PROVIDED",
+        "task_acceptance_targets": [],
         "broad_regression_passed": None,
         "known_baseline_failures": 0,
         "new_regressions": 0,

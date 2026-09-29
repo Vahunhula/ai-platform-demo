@@ -94,6 +94,8 @@ export interface VerificationResult {
   task_specific_targets: string[];
   task_specific_passed: boolean | null;
   task_specific_passed_tests: number | null;
+  task_acceptance_status: "PASS" | "FAIL" | "NOT_PROVIDED";
+  task_acceptance_targets: string[];
   broad_regression_passed: boolean | null;
   baseline_warning_count: number;
   new_regression_count: number;

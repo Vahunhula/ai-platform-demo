@@ -107,7 +107,7 @@ export function TestsTab({ taskId, events }: { taskId: string; events: PlatformE
                   <>
                     <dt>Task tests</dt>
                     <dd>
-                      {m.task_specific_passed === true ? "PASS" : "FAIL"}
+                      {String(m.task_acceptance_status ?? "NOT_PROVIDED")}
                       {typeof m.task_specific_passed_tests === "number" &&
                         ` · ${m.task_specific_passed_tests} passed`}
                     </dd>

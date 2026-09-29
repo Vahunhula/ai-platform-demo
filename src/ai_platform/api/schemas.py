@@ -169,6 +169,8 @@ class VerificationResultResponse(BaseModel):
     task_specific_targets: list[str] = Field(default_factory=list)
     task_specific_passed: bool | None = None
     task_specific_passed_tests: int | None = None
+    task_acceptance_status: str = "NOT_PROVIDED"
+    task_acceptance_targets: list[str] = Field(default_factory=list)
     broad_regression_passed: bool | None = None
     baseline_warning_count: int = 0
     new_regression_count: int = 0
