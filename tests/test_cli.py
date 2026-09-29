@@ -25,6 +25,7 @@ def test_diff_command_reads_task_workspace(tmp_path: Path) -> None:
         "AI_PLATFORM_WORKSPACE_ROOT": str(workspace_root),
         "AI_PLATFORM_DB_PATH": str(tmp_path / "data" / "platform.db"),
         "AI_PLATFORM_CHECKPOINT_DB_PATH": str(tmp_path / "data" / "checkpoints.db"),
+        "AI_PLATFORM_TASK_FILE": str(root / "tests" / "fixtures" / "demo_tasks.json"),
     }
 
     result = CliRunner().invoke(app, ["diff", "DEMO-1"], env=env)
@@ -36,11 +37,13 @@ def test_diff_command_reads_task_workspace(tmp_path: Path) -> None:
 
 
 def test_generic_platform_command_uses_registry_service(tmp_path: Path) -> None:
+    root = Path(__file__).parents[1]
     env = {
         "AI_PLATFORM_DATA_DIR": str(tmp_path / "data"),
         "AI_PLATFORM_WORKSPACE_ROOT": str(tmp_path / "workspaces"),
         "AI_PLATFORM_DB_PATH": str(tmp_path / "data" / "platform.db"),
         "AI_PLATFORM_CHECKPOINT_DB_PATH": str(tmp_path / "data" / "checkpoints.db"),
+        "AI_PLATFORM_TASK_FILE": str(root / "tests" / "fixtures" / "demo_tasks.json"),
         "AI_PLATFORM_USER": "cli-command-user",
     }
 
@@ -59,11 +62,13 @@ def test_generic_platform_command_uses_registry_service(tmp_path: Path) -> None:
 
 
 def test_generic_claude_command_uses_allowlisted_service(tmp_path: Path) -> None:
+    root = Path(__file__).parents[1]
     env = {
         "AI_PLATFORM_DATA_DIR": str(tmp_path / "data"),
         "AI_PLATFORM_WORKSPACE_ROOT": str(tmp_path / "workspaces"),
         "AI_PLATFORM_DB_PATH": str(tmp_path / "data" / "platform.db"),
         "AI_PLATFORM_CHECKPOINT_DB_PATH": str(tmp_path / "data" / "checkpoints.db"),
+        "AI_PLATFORM_TASK_FILE": str(root / "tests" / "fixtures" / "demo_tasks.json"),
         "AI_PLATFORM_USER": "cli-claude-user",
     }
 

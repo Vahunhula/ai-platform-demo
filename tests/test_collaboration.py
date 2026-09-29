@@ -176,6 +176,7 @@ def test_attach_renders_shared_participants_and_conversation(tmp_path: Path) -> 
         "AI_PLATFORM_WORKSPACE_ROOT": str(settings.workspace_root),
         "AI_PLATFORM_DB_PATH": str(settings.db_path),
         "AI_PLATFORM_CHECKPOINT_DB_PATH": str(settings.checkpoint_db_path),
+        "AI_PLATFORM_TASK_FILE": str(settings.tasks_path),
     }
 
     result = CliRunner().invoke(app, ["attach", "DEMO-1"], env=env)
@@ -358,6 +359,7 @@ def test_parallel_cli_processes_write_same_sqlite_without_corruption(tmp_path: P
         "AI_PLATFORM_WORKSPACE_ROOT": str(settings.workspace_root),
         "AI_PLATFORM_DB_PATH": str(settings.db_path),
         "AI_PLATFORM_CHECKPOINT_DB_PATH": str(settings.checkpoint_db_path),
+        "AI_PLATFORM_TASK_FILE": str(settings.tasks_path),
         "PYTHONIOENCODING": "utf-8",
     }
 
