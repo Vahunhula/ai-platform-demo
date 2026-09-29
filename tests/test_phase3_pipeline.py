@@ -45,7 +45,7 @@ def _managed_task(tmp_path: Path, task_id: str = "DEMO-1"):
     machinery -- this exercises the graph's phase pipeline directly.
     """
 
-    task = get_task(load_tasks(_ROOT / "tasks.json"), task_id)
+    task = get_task(load_tasks(_ROOT / "tests" / "fixtures" / "demo_tasks.json"), task_id)
     storage = SQLiteStorage(tmp_path / "data" / "platform.db")
     storage.initialize()
     storage.create_task(task)
@@ -65,7 +65,9 @@ def _managed_task(tmp_path: Path, task_id: str = "DEMO-1"):
             },
         ),
     )
-    workspaces = LocalWorkspaceProvider(tmp_path / "workspaces", _ROOT / "demo_repo")
+    workspaces = LocalWorkspaceProvider(
+        tmp_path / "workspaces", _ROOT / "tests" / "fixtures" / "demo_repo"
+    )
     return task, storage, workspaces
 
 
@@ -129,9 +131,7 @@ def test_happy_path_reaches_human_review_in_one_turn_no_human_needed(tmp_path: P
         if event.event_type is EventType.WORKFLOW_PHASE_CHANGED
         and event.metadata.get("transition_mode") == "AUTOMATIC"
     ]
-    assert [
-        (t.metadata["from_phase"], t.metadata["to_phase"]) for t in transitions
-    ] == [
+    assert [(t.metadata["from_phase"], t.metadata["to_phase"]) for t in transitions] == [
         ("BRAINSTORM", "PLAN"),
         ("PLAN", "IMPLEMENTATION"),
         ("IMPLEMENTATION", "REVIEW"),
@@ -198,15 +198,21 @@ def test_plan_open_questions_wait_then_progress(tmp_path: Path) -> None:
 
     resolved = FakeAgentExecutor()
     state2 = _run(
-        task, storage, workspaces, resolved, tmp_path, continuation=True,
+        task,
+        storage,
+        workspaces,
+        resolved,
+        tmp_path,
+        continuation=True,
         human_messages=["dev: Target app/messages.py."],
     )
     assert state2["status"] == TaskStatus.WAITING_FOR_HUMAN.value
     assert storage.get_task(task.id).workflow_phase is WorkflowPhase.HUMAN_REVIEW
     # Only Plan reran (Brainstorm's v1 from the first turn remains current).
-    assert len(
-        [a for a in storage.list_workflow_artifacts(task.id) if a.kind is ArtifactKind.PLAN]
-    ) == 2
+    assert (
+        len([a for a in storage.list_workflow_artifacts(task.id) if a.kind is ArtifactKind.PLAN])
+        == 2
+    )
 
 
 # ---------------------------------------------------------------- review gate
@@ -293,8 +299,7 @@ def test_unexpected_mutation_during_read_only_phase_fails_the_gate_closed(
     violation_events = [
         event
         for event in storage.get_events(task.id)
-        if event.event_type is EventType.WORKFLOW_PHASE_GATE_EVALUATED
-        and "error" in event.metadata
+        if event.event_type is EventType.WORKFLOW_PHASE_GATE_EVALUATED and "error" in event.metadata
     ]
     assert violation_events
 

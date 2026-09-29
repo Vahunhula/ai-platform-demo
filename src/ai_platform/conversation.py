@@ -22,9 +22,7 @@ from ai_platform.workflow import ChecklistEvaluation, WorkflowArtifact, Workflow
 # Chat to see a phase result, a blocking question, or a command's outcome.
 _PHASE_RESULT_EVENTS = frozenset({EventType.WORKFLOW_PHASE_OUTPUT_CREATED})
 _WAITING_EVENTS = frozenset({EventType.WORKFLOW_PHASE_WAITING_FOR_HUMAN})
-_ACTIVITY_EVENTS = frozenset(
-    {EventType.WORKFLOW_PHASE_STARTED, EventType.WORKFLOW_PHASE_CHANGED}
-)
+_ACTIVITY_EVENTS = frozenset({EventType.WORKFLOW_PHASE_STARTED, EventType.WORKFLOW_PHASE_CHANGED})
 _COMMAND_EVENTS = frozenset(
     {EventType.COMMAND_INVOKED, EventType.COMMAND_SUCCEEDED, EventType.COMMAND_FAILED}
 )

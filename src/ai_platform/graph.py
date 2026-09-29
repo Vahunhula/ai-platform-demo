@@ -19,7 +19,9 @@ never self-declared by the model.
 """
 
 import os
+import shutil
 import sqlite3
+import tempfile
 from pathlib import Path
 from typing import Literal, TypedDict
 from uuid import uuid4
@@ -40,10 +42,19 @@ from ai_platform.models import (
     ModelSelection,
     TaskDefinition,
     TaskStatus,
+    TaskTestFile,
+    TestFileSource,
+    TestGenerationStatus,
     VerificationStatus,
 )
 from ai_platform.router import ModelRouter
 from ai_platform.storage import SQLiteStorage, ensure_group_writable_sqlite_files
+from ai_platform.task_tests import (
+    ALLOWED_TEST_EXTENSIONS,
+    GENERATED_TEST_ROOT,
+    MAX_TEST_FILE_BYTES,
+    task_test_targets,
+)
 from ai_platform.verification import (
     BaselineContext,
     build_verification_command,
@@ -132,6 +143,7 @@ class TaskGraphState(TypedDict, total=False):
     implementation_known_issues: list[str]
     implementation_agent_summary: str
     implementation_structured_valid: bool
+    test_synthesis_ready: bool
 
 
 def run_task_graph(
@@ -235,8 +247,10 @@ def _build_graph(
     def load_task(_state: TaskGraphState) -> TaskGraphState:
         record = storage.get_task(task.id)
         if continuation:
-            if record is None or not record.workspace_path or not workspace_provider.exists(
-                task.id
+            if (
+                record is None
+                or not record.workspace_path
+                or not workspace_provider.exists(task.id)
             ):
                 return {"fatal_error": "Task continuation state or workspace is missing"}
             _change_status(storage, task.id, TaskStatus.ANALYZING, "task-graph", execution_id)
@@ -295,9 +309,7 @@ def _build_graph(
 
     # ---- BRAINSTORM / PLAN / REVIEW: read-only phases sharing one shape -----
 
-    def _run_readonly_phase(
-        state: TaskGraphState, phase: WorkflowPhase
-    ) -> TaskGraphState:
+    def _run_readonly_phase(state: TaskGraphState, phase: WorkflowPhase) -> TaskGraphState:
         attempt = state.get("attempt", 0) + 1
         try:
             selection = router.resolve(task.id, phase, storage=storage)
@@ -544,6 +556,99 @@ def _build_graph(
             "tier_attempt": 0,
         }
 
+    def synthesize_tests(state: TaskGraphState) -> TaskGraphState:
+        specification = storage.get_test_specification(task.id)
+        if (
+            specification is None
+            or specification.generation_status is TestGenerationStatus.GENERATED
+        ):
+            return {"test_synthesis_ready": True}
+        if specification.generation_status is TestGenerationStatus.NEEDS_HUMAN:
+            return {"test_synthesis_ready": False}
+        output_schema = {
+            "type": "object",
+            "properties": {
+                "status": {"type": "string", "enum": ["GENERATED", "NEEDS_HUMAN"]},
+                "message": {"type": "string"},
+                "requirement_mapping": {
+                    "type": "object",
+                    "additionalProperties": {"type": "array", "items": {"type": "string"}},
+                },
+            },
+            "required": ["status", "message", "requirement_mapping"],
+            "additionalProperties": False,
+        }
+        workspace = Path(state["workspace_path"])
+        try:
+            with tempfile.TemporaryDirectory(prefix=f"ai-platform-synthesis-{task.id}-") as temp:
+                isolated = Path(temp) / "workspace"
+                shutil.copytree(workspace, isolated, symlinks=True)
+                result = executor.execute(
+                    ExecutionRequest(
+                        task=task,
+                        selection=_selection_from_state(state),
+                        workspace_path=isolated,
+                        execution_id=execution_id,
+                        attempt=state.get("attempt", 0) + 1,
+                        phase=WorkflowPhase.IMPLEMENTATION,
+                        source_commit=baseline_context.source_commit if baseline_context else None,
+                        output_schema=output_schema,
+                        test_synthesis_stories=specification.original_text,
+                        test_synthesis_output_dir=GENERATED_TEST_ROOT.as_posix(),
+                    )
+                )
+                payload = result.structured_output or {}
+                generated_root = (isolated / GENERATED_TEST_ROOT).resolve()
+                candidates = sorted(generated_root.rglob("*")) if generated_root.is_dir() else []
+                files = [path for path in candidates if path.is_file() and not path.is_symlink()]
+                if payload.get("status") != "GENERATED" or not files:
+                    message = str(payload.get("message") or result.error or result.summary)
+                    storage.update_test_generation(
+                        task.id, TestGenerationStatus.NEEDS_HUMAN, message[:2000]
+                    )
+                    return {"test_synthesis_ready": False}
+                mapping = payload.get("requirement_mapping")
+                if not isinstance(mapping, dict):
+                    mapping = {}
+                for source in files:
+                    relative_generated = source.relative_to(generated_root)
+                    if len(relative_generated.parts) != 1:
+                        raise ValueError("Generated tests must use flat, deterministic filenames")
+                    if source.suffix.lower() not in ALLOWED_TEST_EXTENSIONS:
+                        raise ValueError("Generated test file type is not allowlisted")
+                    content = source.read_text(encoding="utf-8")
+                    if len(content.encode("utf-8")) > MAX_TEST_FILE_BYTES:
+                        raise ValueError("Generated test file exceeds the size limit")
+                    relative = GENERATED_TEST_ROOT / source.name
+                    destination = workspace / relative
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    destination.write_text(content, encoding="utf-8")
+                    storage.add_task_test_file(
+                        TaskTestFile(
+                            file_id=f"testfile_{uuid4().hex}",
+                            task_id=task.id,
+                            filename=source.name,
+                            relative_path=relative.as_posix(),
+                            source=TestFileSource.GENERATED,
+                            content=content,
+                            created_by="claude",
+                            requirement_mapping={
+                                str(key): [str(value) for value in values]
+                                for key, values in mapping.items()
+                                if isinstance(values, list)
+                            },
+                        )
+                    )
+                storage.update_test_generation(
+                    task.id, TestGenerationStatus.GENERATED, str(payload.get("message") or "")
+                )
+                return {"test_synthesis_ready": True}
+        except Exception as error:
+            storage.update_test_generation(
+                task.id, TestGenerationStatus.NEEDS_HUMAN, _safe_error(error)
+            )
+            return {"test_synthesis_ready": False}
+
     def escalate_model(state: TaskGraphState) -> TaskGraphState:
         previous = _selection_from_state(state)
         failed_attempt_count = state.get("tier_attempt", 0)
@@ -767,9 +872,7 @@ def _build_graph(
                     "baseline_warning_count": 0,
                     "new_regression_count": 0,
                 }
-                failure_output = "\n".join(
-                    part for part in (result.stdout, result.stderr) if part
-                )
+                failure_output = "\n".join(part for part in (result.stdout, result.stderr) if part)
             else:
                 changed_paths = [
                     change.path for change in workspace_provider.get_changed_files(task.id)
@@ -780,6 +883,7 @@ def _build_graph(
                     verification_timeout_seconds,
                     baseline_context,
                     changed_paths,
+                    task_owned_targets=task_test_targets(storage.list_task_test_files(task.id)),
                 )
                 result = combined.current_run
                 result.passed = combined.passed
@@ -791,9 +895,7 @@ def _build_graph(
                     "pre_existing_failures": combined.broad_regression.pre_existing_failures,
                     "fixed_failures": combined.broad_regression.fixed_failures,
                     "new_failures": combined.broad_regression.new_failures,
-                    "baseline_warning_count": len(
-                        combined.broad_regression.pre_existing_failures
-                    ),
+                    "baseline_warning_count": len(combined.broad_regression.pre_existing_failures),
                     "new_regression_count": len(combined.broad_regression.new_failures),
                     "broad_regression_passed": combined.broad_regression.passed,
                     "baseline_cached": combined.broad_regression.baseline_cached,
@@ -873,9 +975,7 @@ def _build_graph(
                     "tests_run": _canonical_verification_lines(canonical_verification),
                     "known_issues": known_issues,
                     "canonical_verification": canonical_verification,
-                    "source_commit": (
-                        baseline_context.source_commit if baseline_context else None
-                    ),
+                    "source_commit": (baseline_context.source_commit if baseline_context else None),
                 },
             )
             artifact = storage.create_workflow_artifact(
@@ -966,8 +1066,13 @@ def _build_graph(
     def after_load(
         state: TaskGraphState,
     ) -> Literal[
-        "prepare_workspace", "brainstorm", "plan", "select_model_implementation",
-        "review", "waiting_for_human", "failed",
+        "prepare_workspace",
+        "brainstorm",
+        "plan",
+        "select_model_implementation",
+        "review",
+        "waiting_for_human",
+        "failed",
     ]:
         if state.get("fatal_error"):
             return "failed"
@@ -977,8 +1082,9 @@ def _build_graph(
 
     def after_prepare(
         state: TaskGraphState,
-    ) -> Literal["brainstorm", "plan", "select_model_implementation", "review", "waiting_for_human",
-                 "failed"]:
+    ) -> Literal[
+        "brainstorm", "plan", "select_model_implementation", "review", "waiting_for_human", "failed"
+    ]:
         if state.get("fatal_error"):
             return "failed"
         return _ENTRY_NODE_BY_PHASE[WorkflowPhase(state["workflow_phase"])]
@@ -994,6 +1100,11 @@ def _build_graph(
         if state.get("fatal_error"):
             return "failed"
         return "select_model_implementation" if state.get("gate_eligible") else "waiting_for_human"
+
+    def after_test_synthesis(
+        state: TaskGraphState,
+    ) -> Literal["analyze_implement", "waiting_for_human"]:
+        return "analyze_implement" if state.get("test_synthesis_ready") else "waiting_for_human"
 
     def after_review(state: TaskGraphState) -> Literal["waiting_for_human", "failed"]:
         if state.get("fatal_error"):
@@ -1033,6 +1144,7 @@ def _build_graph(
     builder.add_node("brainstorm", brainstorm)
     builder.add_node("plan", plan)
     builder.add_node("select_model_implementation", select_model_implementation)
+    builder.add_node("synthesize_tests", synthesize_tests)
     builder.add_node("escalate_model", escalate_model)
     builder.add_node("analyze_implement", analyze_implement)
     builder.add_node("verify", verify)
@@ -1046,7 +1158,8 @@ def _build_graph(
     builder.add_conditional_edges("prepare_workspace", after_prepare)
     builder.add_conditional_edges("brainstorm", after_brainstorm)
     builder.add_conditional_edges("plan", after_plan)
-    builder.add_edge("select_model_implementation", "analyze_implement")
+    builder.add_edge("select_model_implementation", "synthesize_tests")
+    builder.add_conditional_edges("synthesize_tests", after_test_synthesis)
     builder.add_conditional_edges("analyze_implement", after_implementation)
     builder.add_conditional_edges("verify", after_verification)
     builder.add_edge("escalate_model", "analyze_implement")
@@ -1103,9 +1216,7 @@ def _upstream_artifacts(
     return {kind.value: current[kind] for kind in kinds if kind in current}
 
 
-def _canonical_verification_evidence(
-    storage: SQLiteStorage, task_id: str
-) -> dict[str, object]:
+def _canonical_verification_evidence(storage: SQLiteStorage, task_id: str) -> dict[str, object]:
     """Return the latest persisted verifier event as bounded machine facts.
 
     Absence or malformed/incomplete verifier evidence fails closed. This helper
@@ -1160,9 +1271,7 @@ def _canonical_verification_lines(evidence: dict[str, object]) -> list[str]:
         if isinstance(task_count, int):
             detail += f" ({task_count} passed)"
         lines.append(f"Focused/task verification: {detail}")
-    lines.append(
-        f"Known baseline failures: {evidence.get('known_baseline_failures', 0)} unchanged"
-    )
+    lines.append(f"Known baseline failures: {evidence.get('known_baseline_failures', 0)} unchanged")
     lines.append(f"New regressions: {evidence.get('new_regressions', 0)}")
     if evidence.get("infrastructure_error"):
         lines.append(f"Verification infrastructure: {evidence['infrastructure_error']}")

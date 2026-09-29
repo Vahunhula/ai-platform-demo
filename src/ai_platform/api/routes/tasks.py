@@ -32,12 +32,15 @@ from ai_platform.api.schemas import (
     TaskDetailResponse,
     TaskListItem,
     TaskModelRoutingResponse,
+    TaskTestFileResponse,
+    TaskTestsResponse,
 )
 from ai_platform.api.security import DeveloperDependency, UserDependency
 from ai_platform.model_preferences import ModelPreferenceService
-from ai_platform.models import LogicalModel
+from ai_platform.models import LogicalModel, TestFileSource
 from ai_platform.router import ModelRoutingError
 from ai_platform.task_creation import CreateTaskCommand
+from ai_platform.task_tests import UploadedTestInput
 from ai_platform.workflow import TransitionMode, WorkflowPhase
 from ai_platform.workflow_services import (
     ChecklistService,
@@ -57,7 +60,12 @@ def create_task(
     creation: TaskCreationDependency,
     user: DeveloperDependency,
 ) -> CreateTaskResponse:
-    record = creation.create(CreateTaskCommand(**body.model_dump()), user)
+    values = body.model_dump(exclude={"uploaded_test_files"})
+    uploads = tuple(
+        UploadedTestInput(filename=item.filename, content=item.content)
+        for item in body.uploaded_test_files
+    )
+    record = creation.create(CreateTaskCommand(**values, uploaded_test_files=uploads), user)
     return CreateTaskResponse(
         id=record.task_id,
         title=record.title,
@@ -70,6 +78,46 @@ def create_task(
         workflow_phase=record.workflow_phase.value,
         created_by=record.created_by or user.username,
         created_at=record.created_at,
+    )
+
+
+@router.get("/{task_id}/tests", response_model=TaskTestsResponse)
+def get_task_tests(
+    task_id: str,
+    context: ContextDependency,
+    presenter: PresenterDependency,
+) -> TaskTestsResponse:
+    canonical_id = context.sessions.get_definition(task_id).id
+    specification = context.storage.get_test_specification(canonical_id)
+    files = context.storage.list_task_test_files(canonical_id)
+    workspace = context.sessions.resolve_workspace(canonical_id, require_exists=True)
+    repository_tests = (
+        sorted(
+            path.relative_to(workspace).as_posix()
+            for path in (workspace / "tests").rglob("*")
+            if path.is_file()
+        )
+        if (workspace / "tests").is_dir()
+        else []
+    )
+
+    def response(item):
+        return TaskTestFileResponse(**item.model_dump(exclude={"file_id", "task_id"}))
+
+    return TaskTestsResponse(
+        task_id=canonical_id,
+        human_requirements=specification.original_text if specification else None,
+        requirements_created_by=specification.created_by if specification else None,
+        generation_status=(
+            specification.generation_status.value if specification else "NOT_REQUESTED"
+        ),
+        generation_message=specification.generation_message if specification else None,
+        generated_tests=[
+            response(item) for item in files if item.source is TestFileSource.GENERATED
+        ],
+        uploaded_tests=[response(item) for item in files if item.source is TestFileSource.UPLOADED],
+        repository_tests=repository_tests,
+        latest_verification=presenter.verification_result(context.storage.get_events(canonical_id)),
     )
 
 

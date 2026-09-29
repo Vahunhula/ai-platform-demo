@@ -37,6 +37,25 @@ class TaskDisposition(StrEnum):
     DEFERRED = "DEFERRED"
 
 
+class TaskOrigin(StrEnum):
+    """Who created a task; system tests are explicitly disposable."""
+
+    USER = "USER"
+    SYSTEM_TEST = "SYSTEM_TEST"
+
+
+class TestFileSource(StrEnum):
+    GENERATED = "GENERATED"
+    UPLOADED = "UPLOADED"
+
+
+class TestGenerationStatus(StrEnum):
+    NOT_REQUESTED = "NOT_REQUESTED"
+    PENDING = "PENDING"
+    GENERATED = "GENERATED"
+    NEEDS_HUMAN = "NEEDS_HUMAN"
+
+
 class ExecutionKind(StrEnum):
     """Mutually exclusive workspace writers."""
 
@@ -140,6 +159,8 @@ class TaskRecord(BaseModel):
     difficulty: TaskDifficulty
     status: TaskStatus
     disposition: TaskDisposition | None = None
+    origin: TaskOrigin = TaskOrigin.USER
+    disposable: bool = False
     workflow_phase: WorkflowPhase = WorkflowPhase.BRAINSTORM
     default_model_selection: LogicalModel = LogicalModel.AUTO
     selected_tier: ModelTier | None = None
@@ -193,6 +214,31 @@ class TaskRecord(BaseModel):
         """Return whether a human shell currently owns the workspace lock."""
 
         return self.active_execution is ExecutionKind.HUMAN_SHELL
+
+
+class TestSpecification(BaseModel):
+    """Canonical human-authored acceptance requirements owned by one task."""
+
+    task_id: str
+    original_text: str
+    created_by: str
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    generation_status: TestGenerationStatus = TestGenerationStatus.PENDING
+    generation_message: str | None = None
+
+
+class TaskTestFile(BaseModel):
+    """Durable task-owned executable test input or generated derivative."""
+
+    file_id: str
+    task_id: str
+    filename: str
+    relative_path: str
+    source: TestFileSource
+    content: str
+    created_by: str
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    requirement_mapping: dict[str, list[str]] = Field(default_factory=dict)
 
 
 class QueuedMessage(BaseModel):

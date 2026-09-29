@@ -1,4 +1,4 @@
-"""Welcome-message behavior for DEMO-1."""
+"""Welcome-message behavior."""
 
 
 def welcome_message() -> str:

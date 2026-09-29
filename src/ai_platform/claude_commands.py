@@ -157,9 +157,7 @@ class ClaudeCapabilityBridge:
         phase_preference = (
             None
             if record.workflow_phase is WorkflowPhase.HUMAN_REVIEW
-            else self.storage.get_phase_model_preference(
-                record.task_id, record.workflow_phase
-            )
+            else self.storage.get_phase_model_preference(record.task_id, record.workflow_phase)
         )
         return {
             "provider": self.settings.executor.lower(),
@@ -248,9 +246,7 @@ class ClaudeCommandService:
             )
         )
 
-    def metadata(
-        self, task_id: str, user: AuthenticatedUser
-    ) -> list[ClaudeCommandMetadata]:
+    def metadata(self, task_id: str, user: AuthenticatedUser) -> list[ClaudeCommandMetadata]:
         record = self.sessions.get_session(task_id).record
         return [self._metadata(item, record, user) for item in self.registry.list()]
 
@@ -322,16 +318,20 @@ class ClaudeCommandService:
         except Exception as error:
             if parsed is None or definition is None:
                 self._audit_unknown(record, user, name, client_command_id)
-            safe = str(error) if isinstance(
-                error,
-                (
-                    CommandArgumentError,
-                    CommandParseError,
-                    CommandUnavailableError,
-                    PermissionDeniedError,
-                    UnknownCommandError,
-                ),
-            ) else "Claude command failed unexpectedly"
+            safe = (
+                str(error)
+                if isinstance(
+                    error,
+                    (
+                        CommandArgumentError,
+                        CommandParseError,
+                        CommandUnavailableError,
+                        PermissionDeniedError,
+                        UnknownCommandError,
+                    ),
+                )
+                else "Claude command failed unexpectedly"
+            )
             self._audit_result(
                 EventType.COMMAND_FAILED,
                 self.storage.get_task(record.task_id) or record,
@@ -415,9 +415,7 @@ class ClaudeCommandService:
         metadata: dict[str, Any] = {
             "namespace": "claude",
             "command": f"claude/{name}",
-            "classification": (
-                definition.classification.value if definition else "UNKNOWN"
-            ),
+            "classification": (definition.classification.value if definition else "UNKNOWN"),
             "arguments": arguments[:MAX_MESSAGE_LENGTH],
             "client_command_id": client_command_id,
             "display_name": user.display_name,
@@ -448,9 +446,7 @@ class ClaudeCommandService:
     @staticmethod
     def _no_arguments(invocation: ClaudeCommandInvocation) -> None:
         if invocation.parsed.arguments:
-            raise CommandArgumentError(
-                f"claude/{invocation.parsed.name} does not accept arguments"
-            )
+            raise CommandArgumentError(f"claude/{invocation.parsed.name} does not accept arguments")
 
     def _help(self, invocation: ClaudeCommandInvocation) -> CommandResult:
         self._no_arguments(invocation)

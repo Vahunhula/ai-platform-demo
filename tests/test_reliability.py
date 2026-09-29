@@ -27,8 +27,8 @@ def _settings(tmp_path: Path) -> Settings:
     root = Path(__file__).parents[1]
     return Settings(
         project_root=root,
-        tasks_path=root / "tasks.json",
-        demo_repository=root / "demo_repo",
+        tasks_path=root / "tests" / "fixtures" / "demo_tasks.json",
+        demo_repository=root / "tests" / "fixtures" / "demo_repo",
         data_dir=tmp_path / "data",
         workspace_root=tmp_path / "workspaces",
         db_path=tmp_path / "data" / "platform.db",
@@ -49,7 +49,7 @@ def _settings(tmp_path: Path) -> Settings:
 
 def _storage(tmp_path: Path) -> SQLiteStorage:
     root = Path(__file__).parents[1]
-    task = get_task(load_tasks(root / "tasks.json"), "DEMO-1")
+    task = get_task(load_tasks(root / "tests" / "fixtures" / "demo_tasks.json"), "DEMO-1")
     storage = SQLiteStorage(tmp_path / "platform.db")
     storage.initialize()
     storage.create_task(task)

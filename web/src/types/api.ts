@@ -49,9 +49,17 @@ export interface CreateTaskRequest {
   base_branch: string;
   assignee_user_id: string;
   jira_key: string | null;
+  acceptance_test_stories: string | null;
+  uploaded_test_files: UploadedTestInput[];
 }
 
-export interface CreateTaskResponse extends CreateTaskRequest {
+export interface UploadedTestInput {
+  filename: string;
+  content: string;
+}
+
+export interface CreateTaskResponse
+  extends Omit<CreateTaskRequest, "acceptance_test_stories" | "uploaded_test_files"> {
   id: string;
   status: "READY";
   workflow_phase: "BRAINSTORM";
@@ -92,6 +100,28 @@ export interface VerificationResult {
   pre_existing_failures: string[];
   fixed_failures: string[];
   new_failures: string[];
+}
+
+export interface TaskTestFile {
+  filename: string;
+  relative_path: string;
+  source: "GENERATED" | "UPLOADED";
+  content: string;
+  created_by: string;
+  created_at: string;
+  requirement_mapping: Record<string, string[]>;
+}
+
+export interface TaskTests {
+  task_id: string;
+  human_requirements: string | null;
+  requirements_created_by: string | null;
+  generation_status: "NOT_REQUESTED" | "PENDING" | "GENERATED" | "NEEDS_HUMAN";
+  generation_message: string | null;
+  generated_tests: TaskTestFile[];
+  uploaded_tests: TaskTestFile[];
+  repository_tests: string[];
+  latest_verification: VerificationResult | null;
 }
 
 export interface MessagingState {

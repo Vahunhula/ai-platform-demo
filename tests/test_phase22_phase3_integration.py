@@ -91,8 +91,7 @@ class ScopedChangeExecutor(FakeAgentExecutor):
         )
         expected = "42" if self.passing else "99"
         (request.workspace_path / "tests" / "test_feature.py").write_text(
-            "from app.feature import value\n"
-            f"def test_feature(): assert value() == {expected}\n",
+            f"from app.feature import value\ndef test_feature(): assert value() == {expected}\n",
             encoding="utf-8",
         )
         result = super()._implementation_result(request)
@@ -291,9 +290,7 @@ def test_provider_success_claim_cannot_override_real_new_regression(tmp_path: Pa
 
     implementation = next(
         artifact
-        for artifact in storage.list_workflow_artifacts(
-            "BASELINE-PHASE3", current_only=True
-        )
+        for artifact in storage.list_workflow_artifacts("BASELINE-PHASE3", current_only=True)
         if artifact.kind is ArtifactKind.IMPLEMENTATION_SUMMARY
     )
     canonical = implementation.payload["canonical_verification"]
@@ -324,14 +321,12 @@ def test_verifier_infrastructure_failure_remains_fail_closed(
 
     implementation = next(
         artifact
-        for artifact in storage.list_workflow_artifacts(
-            "BASELINE-PHASE3", current_only=True
-        )
+        for artifact in storage.list_workflow_artifacts("BASELINE-PHASE3", current_only=True)
         if artifact.kind is ArtifactKind.IMPLEMENTATION_SUMMARY
     )
     canonical = implementation.payload["canonical_verification"]
     assert canonical["status"] == "FAIL"
     assert canonical["infrastructure_error"] == "verifier unavailable"
-    assert "Verification infrastructure: verifier unavailable" in implementation.payload[
-        "tests_run"
-    ]
+    assert (
+        "Verification infrastructure: verifier unavailable" in implementation.payload["tests_run"]
+    )

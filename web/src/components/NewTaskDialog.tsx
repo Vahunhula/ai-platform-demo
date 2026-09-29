@@ -17,6 +17,8 @@ export function NewTaskDialog({ onClose, onCreated }: Props) {
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [jiraKey, setJiraKey] = useState("");
+  const [testStories, setTestStories] = useState("");
+  const [testFiles, setTestFiles] = useState<{ filename: string; content: string }[]>([]);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -66,6 +68,8 @@ export function NewTaskDialog({ onClose, onCreated }: Props) {
         base_branch: baseBranch,
         assignee_user_id: assigneeId,
         jira_key: jiraKey.trim() || null,
+        acceptance_test_stories: testStories.trim() || null,
+        uploaded_test_files: testFiles,
       });
       onCreated(created);
     } catch (reason) {
@@ -119,6 +123,46 @@ export function NewTaskDialog({ onClose, onCreated }: Props) {
             Jira key <small>optional</small>
             <input value={jiraKey} onChange={(event) => setJiraKey(event.target.value)} maxLength={80} />
           </label>
+          <fieldset className="optional-tests">
+            <legend>Tests <small>optional</small></legend>
+            <label>
+              Acceptance / user stories
+              <textarea
+                value={testStories}
+                onChange={(event) => setTestStories(event.target.value)}
+                maxLength={20000}
+                rows={5}
+                placeholder={"- When quantity is below the minimum, ordering is rejected.\n- Quantity 10 is accepted."}
+              />
+            </label>
+            <label>
+              Upload test files
+              <input
+                type="file"
+                multiple
+                accept=".py,.js,.ts,.json,.yaml,.yml"
+                onChange={async (event) => {
+                  const selected = [...(event.target.files ?? [])];
+                  try {
+                    setTestFiles(
+                      await Promise.all(
+                        selected.map(async (file) => ({
+                          filename: file.name,
+                          content: await file.text(),
+                        })),
+                      ),
+                    );
+                    setError(null);
+                  } catch {
+                    setError("The selected test files could not be read.");
+                  }
+                }}
+              />
+              {testFiles.length > 0 && (
+                <small>{testFiles.map((file) => file.filename).join(", ")}</small>
+              )}
+            </label>
+          </fieldset>
           <p className="phase-note">Starts in READY. Brainstorm workflow support is coming in Phase 2.</p>
           {error && <div className="form-error">{error}</div>}
           {!loading && repositories.length === 0 && <div className="form-error">No repositories are registered.</div>}

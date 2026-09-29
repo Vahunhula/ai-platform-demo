@@ -64,6 +64,13 @@ class CreateTaskRequest(BaseModel):
     base_branch: str = Field(min_length=1, max_length=200)
     assignee_user_id: str = Field(min_length=1, max_length=80)
     jira_key: str | None = Field(default=None, max_length=80)
+    acceptance_test_stories: str | None = Field(default=None, max_length=20_000)
+    uploaded_test_files: list["UploadedTestFileRequest"] = Field(
+        default_factory=list, max_length=10
+    )
+    # Accepted for dataclass-client compatibility but deliberately immutable over HTTP.
+    origin: Literal["USER"] = "USER"
+    disposable: Literal[False] = False
 
     @field_validator("title", "description", "repository_id", "base_branch", "assignee_user_id")
     @classmethod
@@ -73,12 +80,19 @@ class CreateTaskRequest(BaseModel):
             raise ValueError("Field must not be blank")
         return value
 
-    @field_validator("jira_key")
+    @field_validator("jira_key", "acceptance_test_stories")
     @classmethod
     def optional_trimmed(cls, value: str | None) -> str | None:
         if value is None:
             return None
         return value.strip() or None
+
+
+class UploadedTestFileRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    filename: str = Field(min_length=1, max_length=200)
+    content: str = Field(max_length=262_144)
 
 
 class CreateTaskResponse(BaseModel):
@@ -94,6 +108,28 @@ class CreateTaskResponse(BaseModel):
     created_by: str
     created_at: datetime
     workspace_ready: Literal[True] = True
+
+
+class TaskTestFileResponse(BaseModel):
+    filename: str
+    relative_path: str
+    source: Literal["GENERATED", "UPLOADED"]
+    content: str
+    created_by: str
+    created_at: datetime
+    requirement_mapping: dict[str, list[str]] = Field(default_factory=dict)
+
+
+class TaskTestsResponse(BaseModel):
+    task_id: str
+    human_requirements: str | None
+    requirements_created_by: str | None
+    generation_status: str
+    generation_message: str | None
+    generated_tests: list[TaskTestFileResponse]
+    uploaded_tests: list[TaskTestFileResponse]
+    repository_tests: list[str]
+    latest_verification: dict[str, Any] | None = None
 
 
 class PresenceUser(BaseModel):

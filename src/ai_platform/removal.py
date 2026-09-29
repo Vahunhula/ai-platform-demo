@@ -11,7 +11,7 @@ from uuid import UUID
 
 from ai_platform.auth import AuthenticatedUser
 from ai_platform.events import EventType
-from ai_platform.models import TaskDisposition, TaskRecord, TaskStatus
+from ai_platform.models import TaskDisposition, TaskOrigin, TaskRecord, TaskStatus
 from ai_platform.sessions import TaskNotFoundError
 from ai_platform.storage import SQLiteStorage
 from ai_platform.workspace import WorkspaceProvider
@@ -36,7 +36,7 @@ class RemovalAvailability:
 @dataclass(frozen=True, slots=True)
 class TaskRemovalResult:
     task_id: str
-    disposition: TaskDisposition
+    disposition: TaskDisposition | None
 
 
 class LangGraphCheckpointStore:
@@ -54,18 +54,14 @@ class LangGraphCheckpointStore:
             connection.execute("BEGIN IMMEDIATE")
             existing = {
                 str(row[0])
-                for row in connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table'"
-                )
+                for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
             }
             # Fixed identifiers only. The installed SqliteSaver uses `writes`
             # and `checkpoints`; the other two names cover its known split-table
             # schema without ever accepting a browser- or database-supplied name.
             for table in ("writes", "checkpoint_writes", "checkpoint_blobs", "checkpoints"):
                 if table in existing:
-                    connection.execute(
-                        f"DELETE FROM {table} WHERE thread_id = ?", (thread_id,)
-                    )
+                    connection.execute(f"DELETE FROM {table} WHERE thread_id = ?", (thread_id,))
             connection.commit()
         except Exception:
             connection.rollback()
@@ -109,9 +105,7 @@ class TaskRemovalService:
         self.workspaces = workspaces
         self.checkpoints = LangGraphCheckpointStore(checkpoint_path)
 
-    def availability(
-        self, record: TaskRecord, user: AuthenticatedUser
-    ) -> RemovalAvailability:
+    def availability(self, record: TaskRecord, user: AuthenticatedUser) -> RemovalAvailability:
         if not user.role.can_modify_tasks:
             return RemovalAvailability(False, "Developer access is required to remove a task.")
         if record.removal_started_at is not None:
@@ -124,6 +118,8 @@ class TaskRemovalService:
             return RemovalAvailability(
                 False, "Accepted human instructions still queued must complete first."
             )
+        if record.origin is TaskOrigin.SYSTEM_TEST and record.disposable:
+            return RemovalAvailability(True)
         if record.status is not TaskStatus.COMPLETED:
             if record.workflow_phase.value == "HUMAN_REVIEW":
                 return RemovalAvailability(
@@ -147,7 +143,11 @@ class TaskRemovalService:
             if not availability.allowed:
                 raise TaskRemovalConflictError(availability.reason or "Task cannot be removed.")
             try:
-                guarded = self.storage.begin_task_removal(current.task_id, user.username)
+                guarded = (
+                    self.storage.begin_disposable_task_removal(current.task_id, user.username)
+                    if current.origin is TaskOrigin.SYSTEM_TEST and current.disposable
+                    else self.storage.begin_task_removal(current.task_id, user.username)
+                )
             except (RuntimeError, ValueError) as error:
                 raise TaskRemovalConflictError(str(error)) from error
             if guarded is None:
@@ -174,6 +174,5 @@ class TaskRemovalService:
             and self.storage.get_task(guarded.task_id, include_removing=True) is not None
         ):
             raise TaskRemovalConflictError("Task removal guard was lost.")
-        assert guarded.disposition is not None
         logger.info("Task removal completed task_id=%s actor=%s", guarded.task_id, user.username)
         return TaskRemovalResult(guarded.task_id, guarded.disposition)

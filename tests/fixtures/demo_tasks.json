@@ -1,0 +1,26 @@
+[
+  {
+    "id": "DEMO-1",
+    "title": "Fix welcome typo",
+    "difficulty": "low",
+    "description": "Fix the typo in the welcome message.",
+    "acceptance_criteria": ["\"Welcome\" is spelled correctly", "all existing tests pass", "no unrelated files are modified"],
+    "verification": {"type": "pytest", "targets": ["tests/test_messages.py"]}
+  },
+  {
+    "id": "DEMO-2",
+    "title": "Fix discount calculation",
+    "difficulty": "medium",
+    "description": "Customers ordering more than 10 items should receive a 10% discount.",
+    "acceptance_criteria": ["quantity > 10 returns a 10% discount", "quantities of 10 or less retain existing behavior", "all tests pass"],
+    "verification": {"type": "pytest", "targets": ["tests/test_discounts.py"]}
+  },
+  {
+    "id": "DEMO-3",
+    "title": "Unify user display name formatting",
+    "difficulty": "high",
+    "description": "User display names are formatted inconsistently across two code paths. Refactor them to share one consistent implementation.",
+    "acceptance_criteria": ["both code paths produce the same display name", "duplicated formatting logic is removed", "existing behavior expected by tests is preserved", "all tests pass"],
+    "verification": {"type": "pytest", "targets": ["tests/test_users.py"]}
+  }
+]

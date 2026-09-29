@@ -52,7 +52,10 @@ def _setup(tmp_path: Path):
     alex = auth.add_user("alex", "Alex", Role.DEVELOPER)
     root = Path(__file__).parents[1]
     repository = context.repositories.register_local(
-        "python-demo", "Python Demo Repository", root / "demo_repo", _branch(root)
+        "python-demo",
+        "Python Demo Repository",
+        root / "tests" / "fixtures" / "demo_repo",
+        _branch(root),
     )
     return context, app, repository, alex
 
@@ -155,16 +158,14 @@ def test_repository_cli_add_list_and_disable(tmp_path: Path) -> None:
             "--display-name",
             "Python Demo Repository",
             "--source",
-            str(root / "demo_repo"),
+            str(root / "tests" / "fixtures" / "demo_repo"),
             "--default-branch",
             _branch(root),
         ],
         env=env,
     )
     listed = runner.invoke(cli_app, ["repository", "list"], env=env)
-    disabled = runner.invoke(
-        cli_app, ["repository", "disable", "python-demo"], env=env
-    )
+    disabled = runner.invoke(cli_app, ["repository", "disable", "python-demo"], env=env)
     assert added.exit_code == listed.exit_code == disabled.exit_code == 0
     assert "python-demo" in listed.stdout and "Python Demo Repository" in listed.stdout
     assert str(root) not in listed.stdout
@@ -231,9 +232,7 @@ async def test_create_auth_validation_and_actor_cannot_be_spoofed(tmp_path: Path
     async with _client(app, "watcher", Role.VIEWER) as viewer:
         assert (await viewer.post("/api/tasks", json=body)).status_code == 403
     async with _client(app, "vakho") as developer:
-        spoofed = await developer.post(
-            "/api/tasks", json={**body, "created_by": "alex"}
-        )
+        spoofed = await developer.post("/api/tasks", json={**body, "created_by": "alex"})
         blank = await developer.post("/api/tasks", json={**body, "title": "  "})
         bad_repository = await developer.post(
             "/api/tasks", json={**body, "repository_id": "repo_missing"}
@@ -326,9 +325,7 @@ def test_provision_and_persistence_failures_never_create_successful_task(
 
 def test_start_reuses_eager_workspace_and_reset_reprovisions(tmp_path: Path) -> None:
     context, app, repository, alex = _setup(tmp_path)
-    record = app.state.task_creation.create(
-        _command(repository.id, alex.user_id), _actor()
-    )
+    record = app.state.task_creation.create(_command(repository.id, alex.user_id), _actor())
     workspace = context.workspaces.get_path(record.task_id)
     marker = workspace / "human-note.txt"
     marker.write_text("keep before start", encoding="utf-8")
@@ -391,7 +388,10 @@ async def test_dynamic_task_workspace_isolation_across_every_operation(tmp_path:
     alex = app.state.auth.add_user("alex", "Alex", Role.DEVELOPER)
     root = Path(__file__).parents[1]
     repository = context.repositories.register_local(
-        "python-demo", "Python Demo Repository", root / "demo_repo", _branch(root)
+        "python-demo",
+        "Python Demo Repository",
+        root / "tests" / "fixtures" / "demo_repo",
+        _branch(root),
     )
 
     async with _client(app, "vakho") as client:
@@ -485,9 +485,7 @@ def test_concurrent_initialize_migrates_additively(tmp_path: Path) -> None:
         columns = {row["name"] for row in connection.execute("PRAGMA table_info(tasks)")}
         tables = {
             row["name"]
-            for row in connection.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'table'"
-            )
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
         }
     assert {
         "repository_id",

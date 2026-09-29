@@ -68,9 +68,7 @@ def test_ten_thousand_event_pages_are_complete_stable_and_indexed(tmp_path: Path
     assert first_stream_batch[-1].sequence_id < second_stream_batch[0].sequence_id
 
     started = monotonic()
-    page, has_more = context.storage.get_event_page(
-        "DEMO-1", order="desc", limit=50
-    )
+    page, has_more = context.storage.get_event_page("DEMO-1", order="desc", limit=50)
     newest_page_elapsed = monotonic() - started
     collected = [event.sequence_id for event in page]
     assert collected == expected[:50]
@@ -101,9 +99,7 @@ def test_ten_thousand_event_pages_are_complete_stable_and_indexed(tmp_path: Path
     # A generous sanity bound catches a lost index without becoming a benchmark assertion.
     assert newest_page_elapsed < 2.0
 
-    oldest, oldest_more = context.storage.get_event_page(
-        "DEMO-1", order="asc", limit=50
-    )
+    oldest, oldest_more = context.storage.get_event_page("DEMO-1", order="asc", limit=50)
     assert [event.sequence_id for event in oldest] == list(reversed(expected))[:50]
     assert oldest_more is True
 
@@ -118,9 +114,7 @@ async def test_activity_page_api_is_bounded_and_legacy_events_remain_compatible(
     async with _client(app) as client:
         newest = await client.get("/api/tasks/DEMO-1/events/page")
         legacy = await client.get("/api/tasks/DEMO-1/events")
-        invalid = await client.get(
-            "/api/tasks/DEMO-1/events/page?order=desc&after_sequence=1"
-        )
+        invalid = await client.get("/api/tasks/DEMO-1/events/page?order=desc&after_sequence=1")
 
     assert newest.status_code == 200
     body = newest.json()

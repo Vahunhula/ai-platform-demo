@@ -10,7 +10,7 @@ from ai_platform.workspace import LocalWorkspaceProvider, WorkspaceError, Worksp
 
 
 def test_creates_clean_git_workspace_without_modifying_source(tmp_path: Path) -> None:
-    source = Path(__file__).parents[1] / "demo_repo"
+    source = Path(__file__).parents[1] / "tests" / "fixtures" / "demo_repo"
     source_message = source / "app" / "messages.py"
     original = source_message.read_bytes()
     provider = LocalWorkspaceProvider(tmp_path / "workspaces", source)
@@ -38,7 +38,7 @@ def test_creates_clean_git_workspace_without_modifying_source(tmp_path: Path) ->
 
 
 def test_rejects_unsafe_task_id(tmp_path: Path) -> None:
-    source = Path(__file__).parents[1] / "demo_repo"
+    source = Path(__file__).parents[1] / "tests" / "fixtures" / "demo_repo"
     provider = LocalWorkspaceProvider(tmp_path / "workspaces", source)
 
     with pytest.raises(ValueError, match="Unsafe task ID"):
@@ -62,7 +62,7 @@ def test_destroy_refuses_source_repository_and_isolates_sibling_task(tmp_path: P
 
 
 def test_workspace_symlink_cannot_redirect_reads_or_recursive_delete(tmp_path: Path) -> None:
-    source = Path(__file__).parents[1] / "demo_repo"
+    source = Path(__file__).parents[1] / "tests" / "fixtures" / "demo_repo"
     root = tmp_path / "workspaces"
     root.mkdir()
     sibling = root / "TASK-B"

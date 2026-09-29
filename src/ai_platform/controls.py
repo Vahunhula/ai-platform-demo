@@ -210,9 +210,7 @@ class TaskControlService:
 
     # ---- turn-launching actions (async) -----------------------------------
 
-    def start(
-        self, task_id: str, client_action_id: str, user: AuthenticatedUser
-    ) -> ControlResult:
+    def start(self, task_id: str, client_action_id: str, user: AuthenticatedUser) -> ControlResult:
         return self._launch(
             ControlAction.START,
             task_id,

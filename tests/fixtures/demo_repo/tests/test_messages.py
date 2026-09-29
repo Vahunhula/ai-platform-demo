@@ -1,5 +1,3 @@
-"""Regression test that intentionally fails until DEMO-1 is implemented."""
-
 from app.messages import welcome_message
 
 

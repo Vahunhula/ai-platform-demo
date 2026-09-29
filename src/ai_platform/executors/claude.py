@@ -186,6 +186,8 @@ class ClaudeAgentExecutor:
         )
 
     def _build_prompt(self, request: ExecutionRequest) -> str:
+        if request.test_synthesis_stories:
+            return self._build_test_synthesis_prompt(request)
         if request.phase is WorkflowPhase.BRAINSTORM:
             return self._build_brainstorm_prompt(request)
         if request.phase is WorkflowPhase.PLAN:
@@ -193,6 +195,29 @@ class ClaudeAgentExecutor:
         if request.phase is WorkflowPhase.REVIEW:
             return self._build_review_prompt(request)
         return self._build_implementation_prompt(request)
+
+    def _build_test_synthesis_prompt(self, request: ExecutionRequest) -> str:
+        return f"""Task: {request.task.id}
+Title: {request.task.title}
+Base commit: {request.source_commit or "<not available>"}
+
+Canonical human-written test requirements (preserve their meaning exactly):
+{request.test_synthesis_stories}
+
+Instructions:
+- This is a bounded TEST SYNTHESIS step, not implementation.
+- Inspect the repository structure, language, existing tests, fixtures, and conventions.
+- Do not change product code, repository tests, configuration, or any other file.
+- You may create executable acceptance tests only under
+  {request.test_synthesis_output_dir or ".ai-platform/tests/generated"}.
+- Do not invent business behavior. If fixtures, expectations, or framework support
+  are unclear or requirements conflict, create no files and return NEEDS_HUMAN with
+  a precise question.
+- Generated assertions must follow the human requirements; the human text remains
+  canonical.
+- Return JSON matching the supplied schema, including a mapping from each original
+  requirement to generated test function names.
+"""
 
     def _build_brainstorm_prompt(self, request: ExecutionRequest) -> str:
         criteria = "\n".join(f"- {item}" for item in request.task.acceptance_criteria)
@@ -419,9 +444,7 @@ Instructions:
         status = inspect_claude_auth(self.settings)
         if status.state in {ClaudeAuthState.AUTHENTICATED, ClaudeAuthState.CONFIGURED}:
             suffix = (
-                " (configured, not validated)"
-                if status.state is ClaudeAuthState.CONFIGURED
-                else ""
+                " (configured, not validated)" if status.state is ClaudeAuthState.CONFIGURED else ""
             )
             return status.method + suffix
         if status.state is ClaudeAuthState.MISSING:

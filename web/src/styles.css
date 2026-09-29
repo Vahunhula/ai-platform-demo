@@ -186,6 +186,20 @@ button {
   gap: 16px;
 }
 
+.optional-tests {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  display: grid;
+  gap: 12px;
+  margin: 4px 0;
+  padding: 14px;
+}
+
+.optional-tests legend {
+  font-weight: 700;
+  padding: 0 6px;
+}
+
 .new-task-dialog label {
   gap: 7px;
   color: #33443c;

@@ -71,9 +71,7 @@ def two_processes(tmp_path: Path):
     executor.gated = False
     for _ in range(10):
         executor.permits.release()
-    _wait_for(
-        lambda: a.context.storage.get_task("DEMO-1").active_execution is None, timeout=60
-    )
+    _wait_for(lambda: a.context.storage.get_task("DEMO-1").active_execution is None, timeout=60)
     for process in (a, b):
         if process.runner is not None:
             process.runner.stop()
@@ -179,7 +177,7 @@ def test_phase2_message_queue_migrates_idempotently(tmp_path: Path) -> None:
     db = tmp_path / "platform.db"
     phase2 = _phase2_storage_module().SQLiteStorage(db)
     phase2.initialize()
-    for task in load_tasks(Path(__file__).parents[1] / "tasks.json"):
+    for task in load_tasks(Path(__file__).parents[1] / "tests" / "fixtures" / "demo_tasks.json"):
         phase2.create_task(task)
     for index, actor in enumerate(("vakho", "vakho")):
         phase2.enqueue_message(
@@ -289,7 +287,8 @@ async def test_simultaneous_resume_through_two_processes_runs_once(two_processes
     # Intent events come only from the lock winner: no duplicated resume/message.
     assert len(_events(a.context, "DEMO-1", EventType.HUMAN_RESUMED)) == 1
     notes = [
-        e for e in _events(a.context, "DEMO-1", EventType.HUMAN_MESSAGE)
+        e
+        for e in _events(a.context, "DEMO-1", EventType.HUMAN_MESSAGE)
         if str(e.metadata.get("message", "")).startswith("note ")
     ]
     assert len(notes) == 1
@@ -444,8 +443,7 @@ async def test_actions_are_attributed_per_user_in_trace(two_processes) -> None:
     who = {
         e["event_type"]: (e["actor_id"], e["actor_display_name"])
         for e in events
-        if e["event_type"]
-        in {"TASK_STARTED", "HUMAN_PAUSED", "HUMAN_RESUMED", "HUMAN_APPROVED"}
+        if e["event_type"] in {"TASK_STARTED", "HUMAN_PAUSED", "HUMAN_RESUMED", "HUMAN_APPROVED"}
     }
     winner = "vakho" if approve_vakho.status_code == 200 else "alex"
     assert who == {

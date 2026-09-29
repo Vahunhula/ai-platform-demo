@@ -19,9 +19,7 @@ from ai_platform.workspace import LocalWorkspaceProvider
 
 
 def _git(path: Path, *args: str) -> str:
-    result = subprocess.run(
-        ["git", *args], cwd=path, check=True, capture_output=True, text=True
-    )
+    result = subprocess.run(["git", *args], cwd=path, check=True, capture_output=True, text=True)
     return result.stdout.strip()
 
 
@@ -62,9 +60,7 @@ def _task(targets: list[str] | None = None) -> TaskDefinition:
         description="Draw a house",
         difficulty=TaskDifficulty.MEDIUM,
         acceptance_criteria=["House tests pass"],
-        verification=VerificationConfig(
-            type=VerificationType.PYTEST, targets=targets or ["tests"]
-        ),
+        verification=VerificationConfig(type=VerificationType.PYTEST, targets=targets or ["tests"]),
     )
 
 
@@ -100,8 +96,12 @@ def test_house_unchanged_baseline_failures_pass(tmp_path: Path) -> None:
     workspace = _workspace(tmp_path, repository)
     _add_house(workspace)
     result = verify_registered_task(
-        _task(), workspace, 20, _context(repository, commit),
-        ["app/house.py", "tests/test_house.py"], cache=BaselineCache()
+        _task(),
+        workspace,
+        20,
+        _context(repository, commit),
+        ["app/house.py", "tests/test_house.py"],
+        cache=BaselineCache(),
     )
     assert result.passed
     assert result.task_specific.targets == ["tests/test_house.py"]
@@ -118,16 +118,16 @@ def test_new_broad_regression_blocks_even_when_house_passes(tmp_path: Path) -> N
         "def test_new_regression(): assert False\n", encoding="utf-8"
     )
     result = verify_registered_task(
-        _task(), workspace, 20, _context(repository, commit),
-        ["tests/test_house.py", "tests/test_regression.py"], cache=BaselineCache()
+        _task(),
+        workspace,
+        20,
+        _context(repository, commit),
+        ["tests/test_house.py", "tests/test_regression.py"],
+        cache=BaselineCache(),
     )
     assert not result.passed
-    assert result.task_specific.failures == [
-        "tests/test_regression.py::test_new_regression"
-    ]
-    assert result.broad_regression.new_failures == [
-        "tests/test_regression.py::test_new_regression"
-    ]
+    assert result.task_specific.failures == ["tests/test_regression.py::test_new_regression"]
+    assert result.broad_regression.new_failures == ["tests/test_regression.py::test_new_regression"]
 
 
 def test_task_specific_failure_blocks(tmp_path: Path) -> None:
@@ -135,8 +135,12 @@ def test_task_specific_failure_blocks(tmp_path: Path) -> None:
     workspace = _workspace(tmp_path, repository)
     _add_house(workspace, passing=False)
     result = verify_registered_task(
-        _task(), workspace, 20, _context(repository, commit),
-        ["tests/test_house.py"], cache=BaselineCache()
+        _task(),
+        workspace,
+        20,
+        _context(repository, commit),
+        ["tests/test_house.py"],
+        cache=BaselineCache(),
     )
     assert not result.task_specific.passed
     assert not result.passed
@@ -148,14 +152,16 @@ def test_fixed_baseline_failure_is_informational(tmp_path: Path) -> None:
     values = workspace / "app" / "values.py"
     values.write_text(values.read_text().replace("discount = 5", "discount = 10"))
     result = verify_registered_task(
-        _task(), workspace, 20, _context(repository, commit),
-        ["app/values.py"], cache=BaselineCache()
+        _task(),
+        workspace,
+        20,
+        _context(repository, commit),
+        ["app/values.py"],
+        cache=BaselineCache(),
     )
     assert result.passed
     assert result.task_specific.executed is False
-    assert result.broad_regression.fixed_failures == [
-        "tests/test_discounts.py::test_discount"
-    ]
+    assert result.broad_regression.fixed_failures == ["tests/test_discounts.py::test_discount"]
 
 
 def test_no_changed_tests_uses_broad_delta(tmp_path: Path) -> None:
@@ -173,8 +179,12 @@ def test_explicit_narrow_target_is_preserved(tmp_path: Path) -> None:
     repository, commit = _repository(tmp_path)
     workspace = _workspace(tmp_path, repository)
     result = verify_registered_task(
-        _task(["tests/test_existing.py"]), workspace, 20,
-        _context(repository, commit), [], cache=BaselineCache()
+        _task(["tests/test_existing.py"]),
+        workspace,
+        20,
+        _context(repository, commit),
+        [],
+        cache=BaselineCache(),
     )
     assert result.passed
     assert result.task_specific.targets == ["tests/test_existing.py"]
@@ -184,8 +194,12 @@ def test_baseline_command_failure_fails_closed(tmp_path: Path) -> None:
     repository, commit = _repository(tmp_path)
     workspace = _workspace(tmp_path, repository)
     result = verify_registered_task(
-        _task(["tests/missing.py"]), workspace, 20,
-        _context(repository, commit), [], cache=BaselineCache()
+        _task(["tests/missing.py"]),
+        workspace,
+        20,
+        _context(repository, commit),
+        [],
+        cache=BaselineCache(),
     )
     assert not result.passed
     assert result.broad_regression.infrastructure_error
@@ -201,8 +215,12 @@ def test_concurrent_tasks_share_only_same_immutable_baseline(tmp_path: Path) -> 
 
     def run(workspace: Path):
         return verify_registered_task(
-            _task(), workspace, 20, _context(repository, commit),
-            ["tests/test_house.py"], cache=cache
+            _task(),
+            workspace,
+            20,
+            _context(repository, commit),
+            ["tests/test_house.py"],
+            cache=cache,
         )
 
     with ThreadPoolExecutor(max_workers=2) as pool:
@@ -225,8 +243,7 @@ def test_baseline_identity_does_not_cross_repositories(tmp_path: Path) -> None:
         _task(), workspace_b, 20, _context(repository_b, commit_b, "repo-b"), [], cache=cache
     )
     assert (
-        result_a.broad_regression.baseline_identity
-        != result_b.broad_regression.baseline_identity
+        result_a.broad_regression.baseline_identity != result_b.broad_regression.baseline_identity
     )
     assert not result_a.broad_regression.baseline_cached
     assert not result_b.broad_regression.baseline_cached

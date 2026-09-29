@@ -56,8 +56,8 @@ def _settings(tmp_path: Path, **overrides: object) -> Settings:
     root = Path(__file__).parents[1]
     settings = Settings(
         project_root=root,
-        tasks_path=root / "tasks.json",
-        demo_repository=root / "demo_repo",
+        tasks_path=root / "tests" / "fixtures" / "demo_tasks.json",
+        demo_repository=root / "tests" / "fixtures" / "demo_repo",
         data_dir=tmp_path / "data",
         workspace_root=tmp_path / "workspaces",
         db_path=tmp_path / "data" / "platform.db",

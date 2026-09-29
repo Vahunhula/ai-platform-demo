@@ -48,8 +48,7 @@ class WorkspaceSnapshot(BaseModel):
         """Return a stable digest of changed paths, classifications, and contents."""
 
         payload = {
-            path: state.model_dump(mode="json")
-            for path, state in sorted(self.files.items())
+            path: state.model_dump(mode="json") for path, state in sorted(self.files.items())
         }
         return sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
@@ -132,9 +131,20 @@ class LocalWorkspaceProvider(WorkspaceProvider):
             raise
         return workspace
 
-    def _export_git_template(
-        self, source: Path, branch: str, workspace: Path, git: str
-    ) -> None:
+    def exclude_platform_paths(self, task_id: str) -> None:
+        """Keep platform-owned task tests out of the product repository diff."""
+
+        workspace = self._existing_workspace(task_id)
+        exclude = workspace / ".git" / "info" / "exclude"
+        existing = exclude.read_text(encoding="utf-8") if exclude.exists() else ""
+        rule = ".ai-platform/\n"
+        if rule not in existing.splitlines(keepends=True):
+            exclude.parent.mkdir(parents=True, exist_ok=True)
+            exclude.write_text(
+                existing + ("" if not existing or existing.endswith("\n") else "\n") + rule
+            )
+
+    def _export_git_template(self, source: Path, branch: str, workspace: Path, git: str) -> None:
         """Export a registered directory exactly as it exists on a validated branch."""
 
         top = self._run_git(source, git, "rev-parse", "--show-toplevel").stdout.strip()
@@ -228,9 +238,7 @@ class LocalWorkspaceProvider(WorkspaceProvider):
         return WorkspaceSnapshot(files=files)
 
     @staticmethod
-    def changes_between(
-        before: WorkspaceSnapshot, after: WorkspaceSnapshot
-    ) -> list[FileChange]:
+    def changes_between(before: WorkspaceSnapshot, after: WorkspaceSnapshot) -> list[FileChange]:
         """Describe files whose Git state or content changed between snapshots."""
 
         changes: list[FileChange] = []

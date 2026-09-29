@@ -1,7 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 
 import { api } from "../api/client";
-import type { ChecklistEvaluation, ConversationMessage, PlatformEvent, TaskDetail } from "../types/api";
+import type { ChecklistEvaluation, ConversationMessage, PlatformEvent, TaskDetail, TaskTests } from "../types/api";
 import { formatCommand, formatDateTime, formatTime, summarizeEvent } from "./format";
 
 export function DiffTab({
@@ -35,11 +35,32 @@ function diffLineClass(line: string): string {
 
 const TEST_EVENTS = new Set(["TEST_STARTED", "TEST_PASSED", "TEST_FAILED"]);
 
-export function TestsTab({ events }: { events: PlatformEvent[] }) {
+export function TestsTab({ taskId, events }: { taskId: string; events: PlatformEvent[] }) {
+  const [owned, setOwned] = useState<TaskTests | null>(null);
+  useEffect(() => {
+    const controller = new AbortController();
+    setOwned(null);
+    api.getTaskTests(taskId, controller.signal).then(setOwned).catch(() => setOwned(null));
+    return () => controller.abort();
+  }, [taskId, events]);
   const tests = events.filter((event) => TEST_EVENTS.has(event.event_type));
-  if (!tests.length) return <Empty text="No persisted verification events yet." />;
   return (
-    <div className="event-list">
+    <div className="event-list tests-view">
+      <TestSection title="Human requirements">
+        {owned?.human_requirements ? (
+          <pre className="test-evidence">{owned.human_requirements}</pre>
+        ) : <p className="muted">Not provided.</p>}
+        {owned && owned.generation_status !== "NOT_REQUESTED" && (
+          <p className="muted">Generation: {owned.generation_status}{owned.generation_message ? ` — ${owned.generation_message}` : ""}</p>
+        )}
+      </TestSection>
+      <TestFileSection title="Generated acceptance tests" files={owned?.generated_tests ?? []} />
+      <TestFileSection title="Uploaded test files" files={owned?.uploaded_tests ?? []} />
+      <TestSection title="Repository tests">
+        {owned?.repository_tests.length ? <ul>{owned.repository_tests.map((path) => <li key={path}><code>{path}</code></li>)}</ul> : <p className="muted">None found.</p>}
+      </TestSection>
+      <h3>Verification</h3>
+      {!tests.length && <p className="muted">No persisted verification events yet.</p>}
       {tests.map((event) => {
         const m = event.metadata;
         const output = [m.stdout, m.stderr, m.error].filter(Boolean).map(String).join("\n");
@@ -110,6 +131,23 @@ export function TestsTab({ events }: { events: PlatformEvent[] }) {
         );
       })}
     </div>
+  );
+}
+
+function TestSection({ title, children }: { title: string; children: ReactNode }) {
+  return <section><h3>{title}</h3>{children}</section>;
+}
+
+function TestFileSection({ title, files }: { title: string; files: TaskTests["generated_tests"] }) {
+  return (
+    <TestSection title={title}>
+      {files.length === 0 ? <p className="muted">None.</p> : files.map((file) => (
+        <details key={file.relative_path}>
+          <summary><code>{file.relative_path}</code> · {file.source.toLowerCase()}</summary>
+          <pre className="test-evidence">{file.content}</pre>
+        </details>
+      ))}
+    </TestSection>
   );
 }
 

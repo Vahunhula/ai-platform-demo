@@ -13,7 +13,7 @@ from ai_platform.workspace import LocalWorkspaceProvider
 def test_diff_command_reads_task_workspace(tmp_path: Path) -> None:
     root = Path(__file__).parents[1]
     workspace_root = tmp_path / "workspaces"
-    provider = LocalWorkspaceProvider(workspace_root, root / "demo_repo")
+    provider = LocalWorkspaceProvider(workspace_root, root / "tests" / "fixtures" / "demo_repo")
     workspace = provider.create("DEMO-1")
     message_file = workspace / "app" / "messages.py"
     message_file.write_text(
@@ -67,9 +67,7 @@ def test_generic_claude_command_uses_allowlisted_service(tmp_path: Path) -> None
         "AI_PLATFORM_USER": "cli-claude-user",
     }
 
-    result = CliRunner().invoke(
-        app, ["claude-command", "DEMO-1", "claude/status"], env=env
-    )
+    result = CliRunner().invoke(app, ["claude-command", "DEMO-1", "claude/status"], env=env)
 
     assert result.exit_code == 0
     assert "claude/status" in result.stdout

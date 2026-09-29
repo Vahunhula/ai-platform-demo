@@ -23,6 +23,7 @@ import type {
   ClaudeCommandMetadata,
   ChecklistEvaluation,
   WorkflowArtifactResponse,
+  TaskTests,
 } from "../types/api";
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/$/, "");
@@ -104,6 +105,8 @@ export const api = {
   createTask: (body: CreateTaskRequest) =>
     request<CreateTaskResponse>("/api/tasks", post(body)),
   getTask: (taskId: string, signal?: AbortSignal) => request<TaskDetail>(task(taskId), { signal }),
+  getTaskTests: (taskId: string, signal?: AbortSignal) =>
+    request<TaskTests>(`${task(taskId)}/tests`, { signal }),
   listModels: (signal?: AbortSignal) => request<ModelCatalogEntry[]>("/api/models", { signal }),
   getModelRouting: (taskId: string, signal?: AbortSignal) =>
     request<TaskModelRouting>(`${task(taskId)}/model-routing`, { signal }),

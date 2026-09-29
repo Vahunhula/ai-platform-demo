@@ -10,7 +10,7 @@ from ai_platform.task_loader import get_task, load_tasks
 
 
 def test_loads_demo_tasks() -> None:
-    tasks_path = Path(__file__).parents[1] / "tasks.json"
+    tasks_path = Path(__file__).parents[1] / "tests" / "fixtures" / "demo_tasks.json"
 
     tasks = load_tasks(tasks_path)
 

@@ -53,15 +53,13 @@ async def test_final_demo_waiting_restart_confirm_and_remove(tmp_path: Path) -> 
     first = _context(tmp_path, first_executor)
     app = create_app(first)
     repository = first.repositories.register_local(
-        "final-demo", "Final Demo", root / "demo_repo", _branch(root)
+        "final-demo", "Final Demo", root / "tests" / "fixtures" / "demo_repo", _branch(root)
     )
-    source_before = (root / "demo_repo" / "app" / "messages.py").read_bytes()
+    source_before = (root / "tests" / "fixtures" / "demo_repo" / "app" / "messages.py").read_bytes()
     task_b_events = list(first.storage.get_events("DEMO-2"))
 
     async with _client(app) as client:
-        assignee = next(
-            user for user in app.state.auth.list_users() if user.username == WEB_ACTOR
-        )
+        assignee = next(user for user in app.state.auth.list_users() if user.username == WEB_ACTOR)
         created_response = await client.post(
             "/api/tasks",
             json={
@@ -76,9 +74,7 @@ async def test_final_demo_waiting_restart_confirm_and_remove(tmp_path: Path) -> 
         assert created_response.status_code == 201
         task_id = created_response.json()["id"]
 
-    first.sessions.start(
-        task_id, HumanIdentity(actor_id=WEB_ACTOR, display_name="Web Tester")
-    )
+    first.sessions.start(task_id, HumanIdentity(actor_id=WEB_ACTOR, display_name="Web Tester"))
     waiting = first.storage.get_task(task_id)
     assert waiting is not None
     assert waiting.workflow_phase is WorkflowPhase.PLAN
@@ -147,6 +143,8 @@ async def test_final_demo_waiting_restart_confirm_and_remove(tmp_path: Path) -> 
     assert restarted.storage.get_task(task_id, include_removing=True) is None
     assert not restarted.workspaces.exists(task_id)
     assert restarted.storage.get_events("DEMO-2") == task_b_events
-    assert (root / "demo_repo" / "app" / "messages.py").read_bytes() == source_before
+    assert (
+        root / "tests" / "fixtures" / "demo_repo" / "app" / "messages.py"
+    ).read_bytes() == source_before
     with restarted.storage.transaction() as connection:
         assert connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"

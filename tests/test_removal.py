@@ -231,9 +231,12 @@ async def test_full_cleanup_is_task_scoped_and_seed_task_stays_removed(tmp_path:
             "task_presence",
             "task_phase_model_preferences",
         ):
-            assert connection.execute(
-                f"SELECT COUNT(*) FROM {table} WHERE task_id = ?", ("DEMO-1",)
-            ).fetchone()[0] == 0
+            assert (
+                connection.execute(
+                    f"SELECT COUNT(*) FROM {table} WHERE task_id = ?", ("DEMO-1",)
+                ).fetchone()[0]
+                == 0
+            )
         tombstone = connection.execute(
             "SELECT task_id, deleted_by FROM removed_tasks WHERE task_id = 'DEMO-1'"
         ).fetchone()
@@ -321,8 +324,7 @@ async def test_removal_guard_blocks_messages_claude_commands_and_sse_reconnect(
     assert platform_command.status_code == 404
     assert stream.status_code == 404
     assert all(
-        event.metadata.get("message") != "zombie"
-        for event in context.storage.get_events("DEMO-1")
+        event.metadata.get("message") != "zombie" for event in context.storage.get_events("DEMO-1")
     )
     # A new process/request can idempotently finish external cleanup after a
     # crash that occurred immediately after the durable guard was acquired.

@@ -87,9 +87,7 @@ def test_help_status_and_failures_are_durable_and_safe(tmp_path: Path) -> None:
     assert executor.requests == []
 
     with pytest.raises(UnknownCommandError, match="Unknown Claude command"):
-        service.execute(
-            "DEMO-1", "claude/foobar '; touch /tmp/pwned'", _user(), "claude-unknown-1"
-        )
+        service.execute("DEMO-1", "claude/foobar '; touch /tmp/pwned'", _user(), "claude-unknown-1")
     with pytest.raises(CommandUnavailableError, match="forbidden"):
         service.execute("DEMO-1", "claude/auth", _user(), "claude-auth-001")
     assert executor.requests == []
@@ -134,9 +132,7 @@ def test_status_reflects_platform_phase_safety_without_running_ai(tmp_path: Path
             "UPDATE tasks SET workflow_phase = ? WHERE task_id = 'DEMO-1'",
             (WorkflowPhase.HUMAN_REVIEW.value,),
         )
-    human_review = service.execute(
-        "DEMO-1", "claude/status", _user(), "phase-human-01"
-    )
+    human_review = service.execute("DEMO-1", "claude/status", _user(), "phase-human-01")
     assert plan.data["execution_mode"] == "read_only"
     assert human_review.data["execution_mode"] == "disabled"
     assert executor.requests == []

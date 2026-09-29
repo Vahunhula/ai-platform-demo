@@ -42,8 +42,9 @@ def _respond(context: ApplicationContext, result: ControlResult) -> JSONResponse
     )
 
 
-@router.post("/{task_id}/start", status_code=202, response_model=ControlResponse,
-             responses=_RESPONSES)
+@router.post(
+    "/{task_id}/start", status_code=202, response_model=ControlResponse, responses=_RESPONSES
+)
 def start_task(
     task_id: str,
     body: StartRequest,
@@ -56,8 +57,9 @@ def start_task(
     return _respond(context, controls.start(task_id, body.client_action_id, user))
 
 
-@router.post("/{task_id}/resume", status_code=202, response_model=ControlResponse,
-             responses=_RESPONSES)
+@router.post(
+    "/{task_id}/resume", status_code=202, response_model=ControlResponse, responses=_RESPONSES
+)
 def resume_task(
     task_id: str,
     body: ResumeRequest,
@@ -67,13 +69,12 @@ def resume_task(
 ) -> JSONResponse:
     """Resume a paused task (optional instruction); the turn runs in the background."""
 
-    return _respond(
-        context, controls.resume(task_id, body.client_action_id, body.message, user)
-    )
+    return _respond(context, controls.resume(task_id, body.client_action_id, body.message, user))
 
 
-@router.post("/{task_id}/reject", status_code=202, response_model=ControlResponse,
-             responses=_RESPONSES)
+@router.post(
+    "/{task_id}/reject", status_code=202, response_model=ControlResponse, responses=_RESPONSES
+)
 def reject_task(
     task_id: str,
     body: RejectRequest,
@@ -83,9 +84,7 @@ def reject_task(
 ) -> JSONResponse:
     """Reject with feedback; a correction turn runs in the background."""
 
-    return _respond(
-        context, controls.reject(task_id, body.client_action_id, body.message, user)
-    )
+    return _respond(context, controls.reject(task_id, body.client_action_id, body.message, user))
 
 
 @router.post("/{task_id}/pause", response_model=ControlResponse, responses=_RESPONSES)

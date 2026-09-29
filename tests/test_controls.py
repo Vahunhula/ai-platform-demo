@@ -186,9 +186,7 @@ async def test_chat_and_start_race_keeps_one_writer(harness: Harness) -> None:
 
     assert early_chat.status_code == 409  # READY tasks do not take chat messages
     assert chat.status_code == 202
-    assert (
-        harness.context.storage.get_task("DEMO-1").workflow_phase is WorkflowPhase.HUMAN_REVIEW
-    )
+    assert harness.context.storage.get_task("DEMO-1").workflow_phase is WorkflowPhase.HUMAN_REVIEW
     assert harness.executor.max_active == 1
 
 
@@ -474,8 +472,7 @@ async def test_full_browser_lifecycle_start_chat_pause_resume_approve(
         await _act(client, "start", client_action_id="life-start-01")
         _wait_for(lambda: harness.status() is TaskStatus.WAITING_FOR_HUMAN and harness.idle())
         assert (
-            harness.context.storage.get_task("DEMO-1").workflow_phase
-            is WorkflowPhase.HUMAN_REVIEW
+            harness.context.storage.get_task("DEMO-1").workflow_phase is WorkflowPhase.HUMAN_REVIEW
         )
         await client.post(
             "/api/tasks/DEMO-1/messages",

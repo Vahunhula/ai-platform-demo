@@ -16,17 +16,14 @@ from ai_platform.api.security import UserDependency
 router = APIRouter(prefix="/tasks", tags=["claude-commands"])
 
 
-@router.get(
-    "/{task_id}/claude-commands", response_model=list[ClaudeCommandMetadataResponse]
-)
+@router.get("/{task_id}/claude-commands", response_model=list[ClaudeCommandMetadataResponse])
 def list_claude_commands(
     task_id: str,
     commands: ClaudeCommandsDependency,
     user: UserDependency,
 ) -> list[ClaudeCommandMetadataResponse]:
     return [
-        ClaudeCommandMetadataResponse(**asdict(item))
-        for item in commands.metadata(task_id, user)
+        ClaudeCommandMetadataResponse(**asdict(item)) for item in commands.metadata(task_id, user)
     ]
 
 

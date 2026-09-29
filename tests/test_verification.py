@@ -8,7 +8,7 @@ from ai_platform.verification import build_verification_command, verify_task
 
 def test_verification_disables_cross_user_pytest_cache(tmp_path: Path) -> None:
     root = Path(__file__).parents[1]
-    task = get_task(load_tasks(root / "tasks.json"), "DEMO-1")
+    task = get_task(load_tasks(root / "tests" / "fixtures" / "demo_tasks.json"), "DEMO-1")
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     (workspace / "tests").mkdir()

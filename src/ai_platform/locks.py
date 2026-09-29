@@ -79,9 +79,7 @@ class ExecutionLockManager:
     ) -> LockAcquisition:
         """Acquire a free lock, safely recovering and retrying when state permits."""
 
-        owner = (
-            f"{kind.value}:{self.hostname}:{self.process_id}:{execution_id}"
-        )
+        owner = f"{kind.value}:{self.hostname}:{self.process_id}:{execution_id}"
         acquired = self.storage.try_acquire_execution(
             task_id,
             kind,
@@ -133,9 +131,7 @@ class ExecutionLockManager:
         if record.active_execution is None:
             return LockInspection(LockHealth.FREE, None, "No workspace writer is active")
         heartbeat = (
-            record.execution_heartbeat_at
-            or record.execution_started_at
-            or record.updated_at
+            record.execution_heartbeat_at or record.execution_started_at or record.updated_at
         )
         age = max(0.0, (self.clock() - heartbeat).total_seconds())
         if age <= self.stale_seconds:
@@ -198,9 +194,7 @@ class ExecutionLockManager:
                 "previous_heartbeat": record.execution_heartbeat_at.isoformat()
                 if record.execution_heartbeat_at
                 else None,
-                "heartbeat_age_seconds": round(
-                    inspection.heartbeat_age_seconds or 0.0, 3
-                ),
+                "heartbeat_age_seconds": round(inspection.heartbeat_age_seconds or 0.0, 3),
                 "recovered_by": recovered_by,
                 "reason": inspection.reason,
             },

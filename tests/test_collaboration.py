@@ -51,8 +51,8 @@ def _settings(tmp_path: Path) -> Settings:
     root = Path(__file__).parents[1]
     return Settings(
         project_root=root,
-        tasks_path=root / "tasks.json",
-        demo_repository=root / "demo_repo",
+        tasks_path=root / "tests" / "fixtures" / "demo_tasks.json",
+        demo_repository=root / "tests" / "fixtures" / "demo_repo",
         data_dir=tmp_path / "data",
         workspace_root=tmp_path / "workspaces",
         db_path=tmp_path / "data" / "platform.db",
@@ -116,7 +116,9 @@ def test_local_identity_prefers_development_override_and_falls_back_to_os(
 def test_events_are_ordered_append_only_and_safe_under_concurrent_writes(
     tmp_path: Path,
 ) -> None:
-    task = get_task(load_tasks(Path(__file__).parents[1] / "tasks.json"), "DEMO-1")
+    task = get_task(
+        load_tasks(Path(__file__).parents[1] / "tests" / "fixtures" / "demo_tasks.json"), "DEMO-1"
+    )
     storage = SQLiteStorage(tmp_path / "platform.db")
     storage.initialize()
     storage.create_task(task)
@@ -198,7 +200,7 @@ def test_shared_takeover_resume_reject_and_human_approval(tmp_path: Path) -> Non
     approval become possible.
     """
 
-    source = Path(__file__).parents[1] / "demo_repo" / "app" / "messages.py"
+    source = Path(__file__).parents[1] / "tests" / "fixtures" / "demo_repo" / "app" / "messages.py"
     source_before = source.read_bytes()
     executor = FakeAgentExecutor()
     service, storage, workspaces = _service(tmp_path, executor)
@@ -245,8 +247,10 @@ def test_shared_takeover_resume_reject_and_human_approval(tmp_path: Path) -> Non
         and event.metadata["message"] == "Review my manual change and continue."
         for event in storage.get_events("DEMO-1")
     )
-    assert (workspace / "app" / "messages.py").read_text(encoding="utf-8").endswith(
-        "# reviewed manually\n"
+    assert (
+        (workspace / "app" / "messages.py")
+        .read_text(encoding="utf-8")
+        .endswith("# reviewed manually\n")
     )
 
     # Reject sends Human Review back to Implementation (MANUAL) with feedback;
@@ -261,15 +265,11 @@ def test_shared_takeover_resume_reject_and_human_approval(tmp_path: Path) -> Non
     assert record is not None
     assert record.status is TaskStatus.COMPLETED
     events = storage.get_events("DEMO-1")
-    assert [event.sequence_id for event in events] == sorted(
-        event.sequence_id for event in events
-    )
+    assert [event.sequence_id for event in events] == sorted(event.sequence_id for event in events)
     assert any(
         event.event_type is EventType.HUMAN_WORKSPACE_CHANGED
         and event.actor_id == "david"
-        and event.metadata["files"] == [
-            {"path": "app/messages.py", "change_type": "modified"}
-        ]
+        and event.metadata["files"] == [{"path": "app/messages.py", "change_type": "modified"}]
         for event in events
     )
     assert any(

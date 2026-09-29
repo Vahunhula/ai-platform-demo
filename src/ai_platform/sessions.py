@@ -26,6 +26,7 @@ from ai_platform.repositories import RepositoryService
 from ai_platform.router import ModelRouter
 from ai_platform.storage import SQLiteStorage
 from ai_platform.task_loader import get_task
+from ai_platform.task_tests import rematerialize_task_tests
 from ai_platform.verification import BaselineContext
 from ai_platform.workflow import TransitionMode, WorkflowPhase
 from ai_platform.workspace import FileChange, LocalWorkspaceProvider
@@ -626,9 +627,9 @@ class TaskSessionService:
                 source_commit = self.repositories.resolve_commit(
                     Path(repository.source), record.base_branch
                 )
-                workspace = self.workspaces.create(
-                    task.id, Path(repository.source), source_commit
-                )
+                workspace = self.workspaces.create(task.id, Path(repository.source), source_commit)
+                self.workspaces.exclude_platform_paths(task.id)
+                rematerialize_task_tests(workspace, self.storage.list_task_test_files(task.id))
                 self.storage.reset_managed_task_runtime(task.id, workspace, lock.owner_token)
             else:
                 # Resets runtime state and releases the lock in one atomic update.

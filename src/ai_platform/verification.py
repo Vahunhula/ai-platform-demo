@@ -79,9 +79,7 @@ class BaselineAwareVerificationResult(BaseModel):
             "Pre-existing baseline failures (non-blocking): "
             f"{len(self.broad_regression.pre_existing_failures)}"
         )
-        lines.extend(
-            f"  {item}" for item in self.broad_regression.pre_existing_failures
-        )
+        lines.extend(f"  {item}" for item in self.broad_regression.pre_existing_failures)
         return "\n".join(lines)
 
 
@@ -145,6 +143,7 @@ def verify_registered_task(
     timeout_seconds: int,
     baseline: BaselineContext,
     changed_paths: list[str],
+    task_owned_targets: list[str] | None = None,
     *,
     cache: BaselineCache = BASELINE_CACHE,
 ) -> BaselineAwareVerificationResult:
@@ -152,20 +151,19 @@ def verify_registered_task(
 
     broad_targets = task.verification.targets
     explicit_narrow = broad_targets != ["tests"]
-    task_targets = (
-        broad_targets
-        if explicit_narrow
-        else sorted(
-            path
-            for path in changed_paths
-            if _is_test_file(path) and (workspace / path).is_file()
+    task_targets = sorted(
+        set(task_owned_targets or [])
+        | (
+            set(broad_targets)
+            if explicit_narrow
+            else {
+                path
+                for path in changed_paths
+                if _is_test_file(path) and (workspace / path).is_file()
+            }
         )
     )
-    task_run = (
-        _run_pytest(task, workspace, task_targets, timeout_seconds)
-        if task_targets
-        else None
-    )
+    task_run = _run_pytest(task, workspace, task_targets, timeout_seconds) if task_targets else None
     identity = _baseline_identity(baseline, task)
 
     def acquire_baseline() -> PytestRunResult:
@@ -173,17 +171,11 @@ def verify_registered_task(
             provider = LocalWorkspaceProvider(
                 Path(directory) / "workspaces", baseline.source_repository
             )
-            clean = provider.create(
-                "baseline", baseline.source_repository, baseline.source_commit
-            )
+            clean = provider.create("baseline", baseline.source_repository, baseline.source_commit)
             return _run_pytest(task, clean, broad_targets, timeout_seconds)
 
     baseline_run, cached = cache.get_or_compute(identity, acquire_baseline)
-    current_run = (
-        task_run
-        if explicit_narrow and task_run is not None
-        else _run_pytest(task, workspace, broad_targets, timeout_seconds)
-    )
+    current_run = _run_pytest(task, workspace, broad_targets, timeout_seconds)
     baseline_failures = set(baseline_run.failures)
     current_failures = set(current_run.failures)
     pre_existing = sorted(baseline_failures & current_failures)
@@ -191,9 +183,7 @@ def verify_registered_task(
     new = sorted(current_failures - baseline_failures)
     infrastructure = baseline_run.infrastructure_error or current_run.infrastructure_error
     broad_passed = infrastructure is None and not new
-    task_passed = task_run is None or (
-        task_run.infrastructure_error is None and task_run.passed
-    )
+    task_passed = task_run is None or (task_run.infrastructure_error is None and task_run.passed)
     task_specific = TaskSpecificVerification(
         targets=task_targets,
         executed=task_run is not None,

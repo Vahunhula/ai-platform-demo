@@ -54,9 +54,7 @@ def require_developer(user: UserDependency) -> AuthenticatedUser:
 DeveloperDependency = Annotated[AuthenticatedUser, Depends(require_developer)]
 
 
-def set_session_cookie(
-    response: Response, secret: str, *, max_age: int, secure: bool
-) -> None:
+def set_session_cookie(response: Response, secret: str, *, max_age: int, secure: bool) -> None:
     response.set_cookie(
         SESSION_COOKIE,
         secret,

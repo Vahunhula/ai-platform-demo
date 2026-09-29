@@ -458,7 +458,7 @@ function App({ user, onSignOut }: AppProps) {
                   {tab === "Changes" && (
                     <DiffTab diff={diff} workspaceExists={detail.workspace_id !== null} />
                   )}
-                  {tab === "Tests" && <TestsTab events={events} />}
+                  {tab === "Tests" && <TestsTab taskId={detail.id} events={events} />}
                   {tab === "Activity" && (
                     <ActivityTab
                       events={activityEvents}

@@ -17,9 +17,7 @@ from ai_platform.workspace import LocalWorkspaceProvider
 from tests.fakes import FakeAgentExecutor
 
 
-def _phase_requests(
-    executor: FakeAgentExecutor, phase: WorkflowPhase
-) -> list[ExecutionRequest]:
+def _phase_requests(executor: FakeAgentExecutor, phase: WorkflowPhase) -> list[ExecutionRequest]:
     return [request for request in executor.requests if request.phase is phase]
 
 
@@ -48,7 +46,7 @@ def _router() -> ModelRouter:
 
 def _task(task_id: str) -> TaskDefinition:
     root = Path(__file__).parents[1]
-    return get_task(load_tasks(root / "tasks.json"), task_id)
+    return get_task(load_tasks(root / "tests" / "fixtures" / "demo_tasks.json"), task_id)
 
 
 def _run(
@@ -60,7 +58,9 @@ def _run(
     storage = SQLiteStorage(tmp_path / "data" / "platform.db")
     storage.initialize()
     storage.create_task(task)
-    workspaces = LocalWorkspaceProvider(tmp_path / "workspaces", root / "demo_repo")
+    workspaces = LocalWorkspaceProvider(
+        tmp_path / "workspaces", root / "tests" / "fixtures" / "demo_repo"
+    )
     state = run_task_graph(
         task,
         _router(),
@@ -90,7 +90,9 @@ def test_forwards_routed_model_and_reaches_human_review(
     expected_model: str,
 ) -> None:
     task = _task(task_id)
-    source_file = Path(__file__).parents[1] / "demo_repo" / "app" / "messages.py"
+    source_file = (
+        Path(__file__).parents[1] / "tests" / "fixtures" / "demo_repo" / "app" / "messages.py"
+    )
     source_before = source_file.read_bytes()
     executor = FakeAgentExecutor()
 

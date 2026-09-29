@@ -61,6 +61,8 @@ class ExecutionRequest(BaseModel):
     upstream_artifacts: dict[str, dict[str, Any]] = Field(default_factory=dict)
     output_schema: dict[str, Any] | None = None
     format_repair_attempt: bool = False
+    test_synthesis_stories: str | None = None
+    test_synthesis_output_dir: str | None = None
     cancellation_requested: Callable[[], bool] | None = Field(default=None, exclude=True)
 
 

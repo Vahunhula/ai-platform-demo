@@ -1,5 +1,3 @@
-"""Regression test that intentionally fails until DEMO-3 is implemented."""
-
 from app.users import audit_display_name, profile_display_name
 
 

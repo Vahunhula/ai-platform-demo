@@ -20,8 +20,12 @@ from ai_platform.models import (
     QueuedMessage,
     TaskDefinition,
     TaskDisposition,
+    TaskOrigin,
     TaskRecord,
     TaskStatus,
+    TaskTestFile,
+    TestGenerationStatus,
+    TestSpecification,
     VerificationConfig,
     VerificationStatus,
 )
@@ -147,6 +151,7 @@ class SQLiteStorage:
             self._create_workflow_tables(connection)
             self._migrate_workflow_artifact_provenance(connection)
             self._create_model_routing_table(connection)
+            self._create_task_test_tables(connection)
             connection.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_events_task_sequence
@@ -187,7 +192,14 @@ class SQLiteStorage:
             )
             self._create_auth_tables(connection)
 
-    def create_managed_task(self, record: TaskRecord, events: list[Event]) -> None:
+    def create_managed_task(
+        self,
+        record: TaskRecord,
+        events: list[Event],
+        *,
+        test_specification: TestSpecification | None = None,
+        test_files: list[TaskTestFile] | None = None,
+    ) -> None:
         """Atomically persist one eagerly provisioned task and its audit history."""
 
         with self._connect(immediate=True) as connection:
@@ -195,10 +207,10 @@ class SQLiteStorage:
                 """
                 INSERT INTO tasks (
                     task_id, title, description, difficulty, status, workflow_phase,
-                    default_model_selection, workspace_path,
+                    default_model_selection, origin, disposable, workspace_path,
                     repository_id, base_branch, assignee_user_id, jira_key, created_by,
                     acceptance_criteria_json, verification_json, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record.task_id,
@@ -208,6 +220,8 @@ class SQLiteStorage:
                     record.status.value,
                     record.workflow_phase.value,
                     record.default_model_selection.value,
+                    record.origin.value,
+                    int(record.disposable),
                     record.workspace_path,
                     record.repository_id,
                     record.base_branch,
@@ -222,6 +236,10 @@ class SQLiteStorage:
             )
             for event in events:
                 self._insert_event(connection, event)
+            if test_specification is not None:
+                self._insert_test_specification(connection, test_specification)
+            for test_file in test_files or []:
+                self._insert_task_test_file(connection, test_file)
 
     def create_task(self, task: TaskDefinition) -> bool:
         """Create initial runtime state, returning whether a row was inserted."""
@@ -1121,17 +1139,12 @@ class SQLiteStorage:
         now = datetime.now(UTC).isoformat()
         terminal = tuple(disposition.value for disposition in TaskDisposition)
         with self._connect(immediate=True) as connection:
-            row = connection.execute(
-                "SELECT * FROM tasks WHERE task_id = ?", (task_id,)
-            ).fetchone()
+            row = connection.execute("SELECT * FROM tasks WHERE task_id = ?", (task_id,)).fetchone()
             if row is None:
                 return None
             if row["removal_started_at"] is not None:
                 return self._record_from_row(row)
-            if (
-                row["disposition"] not in terminal
-                or row["status"] != TaskStatus.COMPLETED.value
-            ):
+            if row["disposition"] not in terminal or row["status"] != TaskStatus.COMPLETED.value:
                 raise ValueError("Task is not CONFIRMED or DEFERRED")
             if row["active_execution"] is not None:
                 raise RuntimeError("Task has an active workspace writer")
@@ -1152,6 +1165,63 @@ class SQLiteStorage:
             )
             if cursor.rowcount != 1:
                 raise RuntimeError("Task changed while removal was starting")
+            updated = connection.execute(
+                "SELECT * FROM tasks WHERE task_id = ?", (task_id,)
+            ).fetchone()
+        return self._record_from_row(updated)
+
+    def begin_disposable_task_removal(self, task_id: str, actor_id: str) -> TaskRecord | None:
+        """Guard a disposable system-test task without weakening user-task rules."""
+
+        now = datetime.now(UTC).isoformat()
+        with self._connect(immediate=True) as connection:
+            row = connection.execute("SELECT * FROM tasks WHERE task_id = ?", (task_id,)).fetchone()
+            if row is None:
+                return None
+            if row["origin"] != TaskOrigin.SYSTEM_TEST.value or not row["disposable"]:
+                raise RuntimeError("Only disposable SYSTEM_TEST tasks use this cleanup path")
+            pending = connection.execute(
+                "SELECT COUNT(*) FROM message_queue WHERE task_id = ? AND status IN (?, ?)",
+                (task_id, MessageStatus.QUEUED.value, MessageStatus.RUNNING.value),
+            ).fetchone()[0]
+            if row["active_execution"] is not None or pending:
+                raise RuntimeError("Disposable task still has a writer or queued instruction")
+            cursor = connection.execute(
+                "UPDATE tasks SET removal_started_at = ?, removal_started_by = ?, updated_at = ? "
+                "WHERE task_id = ? AND removal_started_at IS NULL AND active_execution IS NULL "
+                "AND origin = ? AND disposable = 1",
+                (now, actor_id, now, task_id, TaskOrigin.SYSTEM_TEST.value),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("Task changed while removal was starting")
+            updated = connection.execute(
+                "SELECT * FROM tasks WHERE task_id = ?", (task_id,)
+            ).fetchone()
+        return self._record_from_row(updated)
+
+    def classify_legacy_cleanup_candidate(self, task_id: str) -> TaskRecord:
+        """Mark only recognized pre-2.5.2 demo/smoke rows for trusted cleanup."""
+
+        with self._connect(immediate=True) as connection:
+            row = connection.execute("SELECT * FROM tasks WHERE task_id = ?", (task_id,)).fetchone()
+            if row is None:
+                raise KeyError(task_id)
+            is_demo = task_id in {"DEMO-1", "DEMO-2", "DEMO-3"} and row["created_by"] is None
+            is_smoke = str(row["title"]).startswith("Isolation Smoke ") and str(
+                row["description"] or ""
+            ).startswith("Production Phase 1.1 workspace isolation smoke")
+            if not (is_demo or is_smoke):
+                raise ValueError("Task is not a recognized legacy demo/smoke candidate")
+            pending = connection.execute(
+                "SELECT COUNT(*) FROM message_queue WHERE task_id = ? AND status IN (?, ?)",
+                (task_id, MessageStatus.QUEUED.value, MessageStatus.RUNNING.value),
+            ).fetchone()[0]
+            if row["active_execution"] is not None or pending:
+                raise RuntimeError("Cleanup candidate still has a writer or queued instruction")
+            connection.execute(
+                "UPDATE tasks SET origin = ?, disposable = 1 WHERE task_id = ?",
+                (TaskOrigin.SYSTEM_TEST.value, task_id),
+            )
             updated = connection.execute(
                 "SELECT * FROM tasks WHERE task_id = ?", (task_id,)
             ).fetchone()
@@ -1180,6 +1250,8 @@ class SQLiteStorage:
                 (task_id,),
             )
             for table in (
+                "task_test_files",
+                "task_test_specifications",
                 "checklist_evaluations",
                 "workflow_artifacts",
                 "task_phase_model_preferences",
@@ -1436,6 +1508,102 @@ class SQLiteStorage:
             ).fetchone()
         return f"{row['total']}:{row['latest']}"
 
+    def get_test_specification(self, task_id: str) -> TestSpecification | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM task_test_specifications WHERE task_id = ?", (task_id,)
+            ).fetchone()
+        if row is None:
+            return None
+        return TestSpecification(
+            task_id=row["task_id"],
+            original_text=row["original_text"],
+            created_by=row["created_by"],
+            created_at=row["created_at"],
+            generation_status=row["generation_status"],
+            generation_message=row["generation_message"],
+        )
+
+    def list_task_test_files(self, task_id: str) -> list[TaskTestFile]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM task_test_files WHERE task_id = ? ORDER BY source, relative_path",
+                (task_id,),
+            ).fetchall()
+        return [
+            TaskTestFile(
+                file_id=row["file_id"],
+                task_id=row["task_id"],
+                filename=row["filename"],
+                relative_path=row["relative_path"],
+                source=row["source"],
+                content=row["content"],
+                created_by=row["created_by"],
+                created_at=row["created_at"],
+                requirement_mapping=json.loads(row["requirement_mapping_json"]),
+            )
+            for row in rows
+        ]
+
+    def add_task_test_file(self, test_file: TaskTestFile) -> None:
+        with self._connect(immediate=True) as connection:
+            self._insert_task_test_file(connection, test_file)
+
+    def update_test_generation(
+        self, task_id: str, status: TestGenerationStatus, message: str | None = None
+    ) -> None:
+        with self._connect(immediate=True) as connection:
+            cursor = connection.execute(
+                "UPDATE task_test_specifications SET generation_status = ?, "
+                "generation_message = ? WHERE task_id = ?",
+                (status.value, message, task_id),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError(task_id)
+
+    @staticmethod
+    def _insert_test_specification(
+        connection: sqlite3.Connection, specification: TestSpecification
+    ) -> None:
+        connection.execute(
+            """
+            INSERT INTO task_test_specifications (
+                task_id, original_text, created_by, created_at,
+                generation_status, generation_message
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                specification.task_id,
+                specification.original_text,
+                specification.created_by,
+                specification.created_at.isoformat(),
+                specification.generation_status.value,
+                specification.generation_message,
+            ),
+        )
+
+    @staticmethod
+    def _insert_task_test_file(connection: sqlite3.Connection, test_file: TaskTestFile) -> None:
+        connection.execute(
+            """
+            INSERT INTO task_test_files (
+                file_id, task_id, filename, relative_path, source, content,
+                created_by, created_at, requirement_mapping_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                test_file.file_id,
+                test_file.task_id,
+                test_file.filename,
+                test_file.relative_path,
+                test_file.source.value,
+                test_file.content,
+                test_file.created_by,
+                test_file.created_at.isoformat(),
+                json.dumps(test_file.requirement_mapping, sort_keys=True),
+            ),
+        )
+
     @staticmethod
     def _record_from_row(row: sqlite3.Row) -> TaskRecord:
         return TaskRecord(
@@ -1445,6 +1613,8 @@ class SQLiteStorage:
             difficulty=row["difficulty"],
             status=row["status"],
             disposition=row["disposition"],
+            origin=row["origin"],
+            disposable=bool(row["disposable"]),
             workflow_phase=row["workflow_phase"],
             default_model_selection=row["default_model_selection"],
             selected_tier=row["selected_tier"],
@@ -1522,7 +1692,8 @@ class SQLiteStorage:
             created_at=row["created_at"],
             supersedes_artifact_id=row["supersedes_artifact_id"],
             created_by_type=(
-                row["created_by_type"] if "created_by_type" in columns and row["created_by_type"]
+                row["created_by_type"]
+                if "created_by_type" in columns and row["created_by_type"]
                 else ActorType.HUMAN
             ),
             execution_id=row["execution_id"] if "execution_id" in columns else None,
@@ -1647,6 +1818,8 @@ class SQLiteStorage:
             "default_model_selection": (
                 "ALTER TABLE tasks ADD COLUMN default_model_selection TEXT NOT NULL DEFAULT 'AUTO'"
             ),
+            "origin": "ALTER TABLE tasks ADD COLUMN origin TEXT NOT NULL DEFAULT 'USER'",
+            "disposable": ("ALTER TABLE tasks ADD COLUMN disposable INTEGER NOT NULL DEFAULT 0"),
         }
         for column, statement in migrations.items():
             if column not in columns:
@@ -1889,6 +2062,43 @@ class SQLiteStorage:
                 updated_at TEXT NOT NULL
             )
             """
+        )
+
+    @staticmethod
+    def _create_task_test_tables(connection: sqlite3.Connection) -> None:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS task_test_specifications (
+                task_id TEXT PRIMARY KEY,
+                source TEXT NOT NULL DEFAULT 'HUMAN_STORY',
+                original_text TEXT NOT NULL,
+                created_by TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                generation_status TEXT NOT NULL,
+                generation_message TEXT,
+                FOREIGN KEY (task_id) REFERENCES tasks(task_id)
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS task_test_files (
+                file_id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                filename TEXT NOT NULL,
+                relative_path TEXT NOT NULL,
+                source TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_by TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                requirement_mapping_json TEXT NOT NULL DEFAULT '{}',
+                UNIQUE (task_id, relative_path),
+                FOREIGN KEY (task_id) REFERENCES tasks(task_id)
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_task_test_files_task ON task_test_files(task_id)"
         )
 
     @staticmethod

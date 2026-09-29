@@ -80,8 +80,8 @@ def _settings(tmp_path: Path, **overrides: object) -> Settings:
     root = Path(__file__).parents[1]
     settings = Settings(
         project_root=root,
-        tasks_path=root / "tasks.json",
-        demo_repository=root / "demo_repo",
+        tasks_path=root / "tests" / "fixtures" / "demo_tasks.json",
+        demo_repository=root / "tests" / "fixtures" / "demo_repo",
         data_dir=tmp_path / "data",
         workspace_root=tmp_path / "workspaces",
         db_path=tmp_path / "data" / "platform.db",
@@ -581,9 +581,7 @@ async def test_absolute_workspace_paths_are_redacted(tmp_path: Path) -> None:
 async def test_new_get_endpoints_do_not_mutate_state(tmp_path: Path) -> None:
     context = _context(tmp_path)
     _waiting_for_human(context)
-    create_app(context).state.conversation.submit(
-        "DEMO-1", "queued", "key-readonly", _web_human()
-    )
+    create_app(context).state.conversation.submit("DEMO-1", "queued", "key-readonly", _web_human())
     before = (
         context.sessions.list_tasks(),
         context.storage.get_events("DEMO-1"),
@@ -704,8 +702,9 @@ def test_sse_streams_ordered_public_events_and_resumes_after_last_event_id(
 
     frames, raw = _read_sse(
         f"{url}?after={first - 1}",
-        until=lambda fs: len(_platform_events(fs)) >= 3
-        and any(f.get("event") == "conversation" for f in fs),
+        until=lambda fs: (
+            len(_platform_events(fs)) >= 3 and any(f.get("event") == "conversation" for f in fs)
+        ),
     )
     streamed = _platform_events(frames)
     assert [int(f["id"]) for f in streamed] == [first, second, third]
@@ -752,9 +751,7 @@ async def test_sse_rejects_unknown_task_and_bad_cursor(tmp_path: Path) -> None:
     assert bad.status_code == 422
 
 
-def test_runner_and_session_configuration(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_runner_and_session_configuration(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     for name in (
         "AI_PLATFORM_ENABLE_RUNNER",
         "AI_PLATFORM_SESSION_HOURS",

@@ -124,9 +124,7 @@ class AuthService:
         if not display_name or len(display_name) > 100 or "\n" in display_name:
             raise UserManagementError("Display name must be 1-100 characters on one line")
         with self.storage.transaction(immediate=True) as connection:
-            if connection.execute(
-                "SELECT 1 FROM users WHERE username = ?", (username,)
-            ).fetchone():
+            if connection.execute("SELECT 1 FROM users WHERE username = ?", (username,)).fetchone():
                 raise UserManagementError(f"User {username} already exists")
             record = UserRecord(str(uuid4()), username, display_name, role, True, _now())
             connection.execute(
@@ -146,11 +144,7 @@ class AuthService:
     def assignable_users(self) -> list[UserRecord]:
         """Return enabled users with developer capability, never auth material."""
 
-        return [
-            user
-            for user in self.list_users()
-            if user.enabled and user.role.can_modify_tasks
-        ]
+        return [user for user in self.list_users() if user.enabled and user.role.can_modify_tasks]
 
     def assignable_user(self, user_id: str) -> UserRecord:
         with self.storage.transaction() as connection:

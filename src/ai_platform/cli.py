@@ -321,30 +321,22 @@ def repository_add(
 
     context = _application_context()
     repository = _repository_call(
-        lambda: context.repositories.register_local(
-            slug, display_name, source, default_branch
-        )
+        lambda: context.repositories.register_local(slug, display_name, source, default_branch)
     )
-    console.print(
-        f"Repository [bold]{repository.slug}[/bold] registered as {repository.id}."
-    )
+    console.print(f"Repository [bold]{repository.slug}[/bold] registered as {repository.id}.")
 
 
 @repositories_app.command("disable")
 def repository_disable(slug: str) -> None:
     """Disable task creation from a registered repository."""
 
-    repository = _repository_call(
-        lambda: _application_context().repositories.disable(slug)
-    )
+    repository = _repository_call(lambda: _application_context().repositories.disable(slug))
     console.print(f"Repository {repository.slug} disabled.")
 
 
 def _auth_service() -> AuthService:
     context = _application_context()
-    return AuthService(
-        context.storage, session_ttl=timedelta(hours=context.settings.session_hours)
-    )
+    return AuthService(context.storage, session_ttl=timedelta(hours=context.settings.session_hours))
 
 
 def _auth_call[T](operation: Callable[[], T]) -> T:

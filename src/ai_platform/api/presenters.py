@@ -103,9 +103,7 @@ def _render_artifact_body(kind: ArtifactKind, payload: dict[str, Any]) -> str:
             + f"\n\n{str(payload.get('summary', ''))}"
             + _bulleted("Changed files (platform-generated)", payload.get("files_changed", []))
             + _bulleted("Verification (platform-generated)", payload.get("tests_run", []))
-            + _bulleted(
-                "Provider-reported considerations", payload.get("known_issues", [])
-            )
+            + _bulleted("Provider-reported considerations", payload.get("known_issues", []))
             + (
                 "\n\nCanonical verification event\n"
                 f"- Sequence: {canonical.get('event_sequence_id')}"
@@ -136,6 +134,7 @@ def _render_artifact_body(kind: ArtifactKind, payload: dict[str, Any]) -> str:
             text += f"\n\nNext phase: {str(target).replace('_', ' ').title()}"
         return text
     return str(payload)
+
 
 _COMMON_PUBLIC_METADATA = {
     "attempt",
@@ -599,7 +598,7 @@ class Presenter:
             workspace_id=session.definition.id if record.workspace_path else None,
             current_attempt=record.attempt,
             verification_status=record.verification_status.value.upper(),
-            verification_result=self._verification_result(session.events),
+            verification_result=self.verification_result(session.events),
             agent_working=record.active_execution is ExecutionKind.AGENT,
             pause_requested=record.pause_requested,
             queued_messages=queued_messages,
@@ -622,7 +621,7 @@ class Presenter:
             base_branch=record.base_branch,
         )
 
-    def _verification_result(self, events: list[Event]) -> VerificationResultResponse | None:
+    def verification_result(self, events: list[Event]) -> VerificationResultResponse | None:
         for event in reversed(events):
             if event.event_type not in {EventType.TEST_PASSED, EventType.TEST_FAILED}:
                 continue
