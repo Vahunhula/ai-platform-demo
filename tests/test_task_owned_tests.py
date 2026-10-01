@@ -8,10 +8,11 @@ from pathlib import Path
 import pytest
 
 from ai_platform.api.app import create_app
+from ai_platform.api.presenters import Presenter
 from ai_platform.application import create_application_context
 from ai_platform.auth import AuthenticatedUser, Role
 from ai_platform.events import EventType
-from ai_platform.executors.base import ExecutionRequest, ExecutionResult
+from ai_platform.executors.base import AgentExecutorError, ExecutionRequest, ExecutionResult
 from ai_platform.identity import HumanIdentity
 from ai_platform.models import TaskDisposition, TaskOrigin, TaskStatus
 from ai_platform.models import TestFileSource as FileSource
@@ -186,6 +187,17 @@ class NeedsHumanSynthesisExecutor(FakeAgentExecutor):
         return super().execute(request)
 
 
+class ProviderFailureSynthesisExecutor(FakeAgentExecutor):
+    def execute(self, request: ExecutionRequest) -> ExecutionResult:
+        if request.test_synthesis_stories:
+            raise AgentExecutorError(
+                "Your organization has disabled Claude subscription access for Claude Code · "
+                "Use an Anthropic API key instead, or ask your admin to enable access",
+                fatal=True,
+            )
+        return super().execute(request)
+
+
 class ClarifiedSynthesisExecutor(FakeAgentExecutor):
     def __init__(self) -> None:
         super().__init__()
@@ -286,8 +298,49 @@ def test_unclear_story_stops_with_needs_human_reason(tmp_path: Path) -> None:
     assert specification is not None
     assert specification.generation_status.value == "NEEDS_HUMAN"
     assert specification.generation_message == "Which fixture supplies negative values?"
+    waiting = next(
+        event for event in context.storage.get_events(task.task_id)
+        if event.event_type is EventType.WORKFLOW_PHASE_WAITING_FOR_HUMAN
+    )
+    assert waiting.metadata["reason"] == "The acceptance-test requirement needs clarification."
+    assert waiting.metadata["question"] == "Which fixture supplies negative values?"
     assert context.storage.list_task_test_files(task.task_id) == []
     assert context.storage.get_task(task.task_id).status is TaskStatus.WAITING_FOR_HUMAN
+
+
+def test_provider_failure_does_not_become_test_synthesis_human_question(tmp_path: Path) -> None:
+    context, app, repository, actor, _source = _setup(tmp_path, ProviderFailureSynthesisExecutor())
+    task = app.state.task_creation.create(
+        _command(
+            repository.id,
+            actor.user_id,
+            acceptance_test_stories="Negative values are rejected.",
+        ),
+        actor,
+    )
+    context.sessions.start(
+        task.task_id, HumanIdentity(actor_id=actor.user_id, display_name=actor.display_name)
+    )
+
+    record = context.storage.get_task(task.task_id)
+    assert record is not None and record.status is TaskStatus.FAILED
+    assert not [
+        event for event in context.storage.get_events(task.task_id)
+        if event.event_type is EventType.WORKFLOW_PHASE_WAITING_FOR_HUMAN
+    ]
+    failure = [
+        event for event in context.storage.get_events(task.task_id)
+        if event.event_type is EventType.TASK_FAILED
+    ][-1]
+    assert "AI provider unavailable" in failure.metadata["error"]
+    assert "Anthropic API key" in failure.metadata["error"]
+    assert "What specific expected behavior" not in failure.metadata["error"]
+    chat = [
+        Presenter(context.settings).chat_item(item)
+        for item in app.state.conversation.list_chat_items(task.task_id)
+    ]
+    assert any("AI provider unavailable" in item.content for item in chat)
+    assert any("Anthropic API key" in item.content for item in chat)
 
 
 def test_test_synthesis_clarification_reply_resumes_same_implementation_phase(

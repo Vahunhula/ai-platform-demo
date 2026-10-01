@@ -292,6 +292,30 @@ describe("Chat as a projection of workflow state (Phase 6)", () => {
     expect(screen.getByText("Needs your input")).toBeTruthy();
   });
 
+  it("renders structured waiting reasons and questions without duplicate labels", async () => {
+    mocks.getClaudeCommands.mockResolvedValue([]);
+    mocks.getCommands.mockResolvedValue([]);
+    show([
+      chatItem({
+        id: "needs-input-clean-fields",
+        type: "human_input_required",
+        role: "platform",
+        actor_display_name: "Platform",
+        title: "Needs your input · Implementation",
+        content: "Claude needs your input to continue Implementation.\n\nWhy:\nExpected behavior is ambiguous.\n\nQuestion:\nWhich fixture supplies negative values?",
+        sequence_id: 6,
+        workflow_phase: "IMPLEMENTATION",
+        requires_human_input: true,
+      }),
+    ]);
+
+    const card = screen.getByText("Needs your input · Implementation").closest("article");
+    expect(card?.textContent).toContain("Why:\nExpected behavior is ambiguous.");
+    expect(card?.textContent).toContain("Question:\nWhich fixture supplies negative values?");
+    expect(card?.textContent?.match(/Question:/g)).toHaveLength(1);
+    expect(card?.textContent?.match(/Reason:/g)).toBeNull();
+  });
+
   it("renders platform activity (phase started / gate passed) as a narrow status line", async () => {
     mocks.getClaudeCommands.mockResolvedValue([]);
     mocks.getCommands.mockResolvedValue([]);

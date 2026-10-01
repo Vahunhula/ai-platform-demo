@@ -557,31 +557,30 @@ def _build_graph(
         }
 
     def synthesize_tests(state: TaskGraphState) -> TaskGraphState:
-        def clarification_message(message: str) -> str:
+        def clarification_fields(message: str) -> tuple[str, str]:
             stripped = message.strip()
-            if "?" in stripped and len(stripped) > 8:
-                return stripped[:2000]
-            if stripped:
-                return (
-                    "Reason:\n"
-                    f"{stripped[:1500]}\n\n"
-                    "Question:\n"
+            reason, question = "", ""
+            if "Question:" in stripped:
+                before, question = stripped.split("Question:", 1)
+                reason = before.removeprefix("Reason:").strip()
+                question = question.strip()
+            elif "?" in stripped and len(stripped) > 8:
+                question = stripped
+            else:
+                reason = stripped
+            if not question:
+                question = (
                     "What specific expected behavior or repository fixture should the "
                     "generated acceptance test use?"
-                )[:2000]
-            return (
-                "Reason:\n"
-                "The test synthesis provider returned NEEDS_HUMAN without an actionable "
-                "question.\n\n"
-                "Question:\n"
-                "What specific expected behavior or repository fixture should the generated "
-                "acceptance test use?"
-            )
+                )
+            if not reason:
+                reason = "The acceptance-test requirement needs clarification."
+            return reason[:1500], question[:2000]
 
         def needs_human(message: str) -> TaskGraphState:
-            normalized_message = clarification_message(message)
+            reason, question = clarification_fields(message)
             storage.update_test_generation(
-                task.id, TestGenerationStatus.NEEDS_HUMAN, normalized_message
+                task.id, TestGenerationStatus.NEEDS_HUMAN, question
             )
             storage.append_event(
                 Event(
@@ -593,8 +592,8 @@ def _build_graph(
                         "phase": WorkflowPhase.IMPLEMENTATION.value,
                         "execution_id": execution_id,
                         "blocking_needs_human": ["test_synthesis"],
-                        "reason": normalized_message,
-                        "question": normalized_message,
+                        "reason": reason,
+                        "question": question,
                         "related_requirement": specification.original_text[:2000]
                         if specification
                         else "",
@@ -602,6 +601,30 @@ def _build_graph(
                 )
             )
             return {"test_synthesis_ready": False}
+
+        def provider_failure(message: str) -> TaskGraphState:
+            safe_error = message.strip()[:2000] or "The AI provider returned no error detail."
+            recovery = (
+                "Configure the platform Anthropic API key or ask the organization admin "
+                "to enable Claude Code access."
+            )
+            error = f"AI provider unavailable\n\n{safe_error}\n\nRecovery: {recovery}"
+            storage.append_event(
+                Event(
+                    task_id=task.id,
+                    event_type=EventType.AGENT_FAILED,
+                    actor_type=ActorType.AGENT,
+                    actor_id="test-synthesis",
+                    metadata={
+                        "execution_id": execution_id,
+                        "phase": WorkflowPhase.IMPLEMENTATION.value,
+                        "summary": "AI provider unavailable",
+                        "error": error,
+                        "fatal": True,
+                    },
+                )
+            )
+            return {"fatal_error": error, "test_synthesis_ready": False}
 
         specification = storage.get_test_specification(task.id)
         if (
@@ -660,6 +683,8 @@ def _build_graph(
                     )
                 )
                 payload = result.structured_output or {}
+                if not result.succeeded or result.error:
+                    return provider_failure(str(result.error or result.summary))
                 generated_root = (isolated / GENERATED_TEST_ROOT).resolve()
                 candidates = sorted(generated_root.rglob("*")) if generated_root.is_dir() else []
                 files = [path for path in candidates if path.is_file() and not path.is_symlink()]
@@ -703,8 +728,10 @@ def _build_graph(
                     task.id, generated_records, str(payload.get("message") or "")
                 )
                 return {"test_synthesis_ready": True}
+        except AgentExecutorError as error:
+            return provider_failure(_safe_error(error))
         except Exception as error:
-            return needs_human(_safe_error(error))
+            return {"fatal_error": f"Test synthesis failed: {_safe_error(error)}"}
 
     def escalate_model(state: TaskGraphState) -> TaskGraphState:
         previous = _selection_from_state(state)
@@ -1164,7 +1191,9 @@ def _build_graph(
 
     def after_test_synthesis(
         state: TaskGraphState,
-    ) -> Literal["analyze_implement", "waiting_for_human"]:
+    ) -> Literal["analyze_implement", "waiting_for_human", "failed"]:
+        if state.get("fatal_error"):
+            return "failed"
         return "analyze_implement" if state.get("test_synthesis_ready") else "waiting_for_human"
 
     def after_review(state: TaskGraphState) -> Literal["waiting_for_human", "failed"]:

@@ -511,7 +511,7 @@ class Presenter:
         if event.event_type is EventType.WORKFLOW_PHASE_STARTED:
             phase = WorkflowPhase(metadata["phase"])
             content = f"{_phase_label(phase)} phase started"
-        else:  # WORKFLOW_PHASE_CHANGED
+        elif event.event_type is EventType.WORKFLOW_PHASE_CHANGED:
             from_phase = WorkflowPhase(metadata["from_phase"])
             to_phase = WorkflowPhase(metadata["to_phase"])
             phase = to_phase
@@ -526,6 +526,8 @@ class Presenter:
                     content = f"{from_label} passed its readiness gate.\nMoving to {to_label}…"
             else:
                 content = f"Moved from {from_label} to {to_label}."
+        else:  # TASK_FAILED
+            content = self.redactor.text(str(metadata.get("error") or "Task failed"))
         return MessageResponse(
             id=event.id,
             task_id=event.task_id,
