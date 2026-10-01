@@ -2,7 +2,7 @@
 
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException, Query, Response
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 
 from ai_platform.api.dependencies import (
     ContextDependency,
@@ -132,6 +132,7 @@ def list_tasks(context: ContextDependency, presenter: PresenterDependency) -> li
 @router.get("/{task_id}", response_model=TaskDetailResponse)
 def get_task(
     task_id: str,
+    request: Request,
     context: ContextDependency,
     controls: ControlsDependency,
     presenter: PresenterDependency,
@@ -152,6 +153,12 @@ def get_task(
         else None
     )
     removal_state = removal.availability(session.record, user)
+    assignees = (
+        request.app.state.auth.users_by_id([session.record.assignee_user_id])
+        if session.record.assignee_user_id
+        else {}
+    )
+    assignee = assignees.get(session.record.assignee_user_id or "")
     return presenter.task_detail(
         session,
         user,
@@ -159,6 +166,7 @@ def get_task(
         actions,
         latest_readiness=latest_readiness,
         removal=removal_state,
+        assignee_display_name=assignee.display_name if assignee else None,
     )
 
 

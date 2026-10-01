@@ -587,6 +587,7 @@ class Presenter:
         *,
         removal: RemovalAvailability,
         latest_readiness: ReadinessSummary | None = None,
+        assignee_display_name: str | None = None,
     ) -> TaskDetailResponse:
         record = session.record
         reason = ConversationService.acceptance(record)
@@ -621,6 +622,7 @@ class Presenter:
             remove_disabled_reason=removal.reason,
             repository_id=record.repository_id,
             base_branch=record.base_branch,
+            assignee_display_name=assignee_display_name,
         )
 
     def verification_result(self, events: list[Event]) -> VerificationResultResponse | None:

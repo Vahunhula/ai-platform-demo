@@ -76,7 +76,10 @@ class TaskCreationService:
             uploads = validate_uploads(list(command.uploaded_test_files))
         except TaskTestError as error:
             raise TaskCreationError(str(error)) from error
-        stories = (command.acceptance_test_stories or "").strip() or None
+        # This is canonical human-authored source text. Validation rejects a
+        # whitespace-only value, but meaningful leading/trailing whitespace is
+        # retained exactly as submitted.
+        stories = command.acceptance_test_stories
         repository = self.repositories.get(command.repository_id, require_enabled=True)
         try:
             assignee = self.auth.assignable_user(command.assignee_user_id)

@@ -216,6 +216,18 @@ def test_human_story_synthesizes_and_verifies_only_in_own_task(tmp_path: Path) -
     assert verification.metadata["task_acceptance_targets"] == [generated[0].relative_path]
 
 
+def test_human_story_source_text_is_persisted_exactly(tmp_path: Path) -> None:
+    context, app, repository, actor, _source = _setup(tmp_path)
+    stories = "  - Quantity 10 should be accepted\n- Preserve this final line.  \n"
+    task = app.state.task_creation.create(
+        _command(repository.id, actor.user_id, acceptance_test_stories=stories), actor
+    )
+
+    specification = context.storage.get_test_specification(task.task_id)
+    assert specification is not None
+    assert specification.original_text == stories
+
+
 def test_unclear_story_stops_with_needs_human_reason(tmp_path: Path) -> None:
     context, app, repository, actor, _source = _setup(tmp_path, NeedsHumanSynthesisExecutor())
     task = app.state.task_creation.create(

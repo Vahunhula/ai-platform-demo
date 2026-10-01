@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type DragEvent, type FormEvent } from "react";
 
 import { api } from "../api/client";
 import type { AssignableUser, CreateTaskResponse, RepositoryOption } from "../types/api";
@@ -9,6 +9,7 @@ interface Props {
 }
 
 export function NewTaskDialog({ onClose, onCreated }: Props) {
+  const fileInput = useRef<HTMLInputElement>(null);
   const [repositories, setRepositories] = useState<RepositoryOption[]>([]);
   const [users, setUsers] = useState<AssignableUser[]>([]);
   const [repositoryId, setRepositoryId] = useState("");
@@ -68,13 +69,32 @@ export function NewTaskDialog({ onClose, onCreated }: Props) {
         base_branch: baseBranch,
         assignee_user_id: assigneeId,
         jira_key: jiraKey.trim() || null,
-        acceptance_test_stories: testStories.trim() || null,
+        acceptance_test_stories: testStories.trim() ? testStories : null,
         uploaded_test_files: testFiles,
       });
       onCreated(created);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
       setSubmitting(false);
+    }
+  };
+
+  const selectFiles = async (files: File[]) => {
+    const allowed = new Set([".py", ".js", ".ts", ".json", ".yaml", ".yml"]);
+    const unsupported = files.find((file) => {
+      const extension = file.name.slice(file.name.lastIndexOf(".")).toLowerCase();
+      return !allowed.has(extension);
+    });
+    if (unsupported) {
+      setTestFiles([]);
+      setError(`Unsupported test file: ${unsupported.name}. Use .py, .js, .ts, .json, .yaml, or .yml.`);
+      return;
+    }
+    try {
+      setTestFiles(await Promise.all(files.map(async (file) => ({ filename: file.name, content: await file.text() }))));
+      setError(null);
+    } catch {
+      setError("The selected test files could not be read.");
     }
   };
 
@@ -89,42 +109,41 @@ export function NewTaskDialog({ onClose, onCreated }: Props) {
       >
         <div className="dialog-heading">
           <div>
-            <span className="eyebrow">New TaskSession</span>
-            <h2 id="new-task-title">Create task</h2>
+            <span className="eyebrow">AI Platform</span>
+            <h2 id="new-task-title">New Task</h2>
           </div>
           <button className="dialog-close" onClick={onClose} aria-label="Close">×</button>
         </div>
         <form onSubmit={submit}>
-          <label>
-            Title <span aria-hidden="true">*</span>
-            <input value={title} onChange={(event) => setTitle(event.target.value)} maxLength={200} required />
-          </label>
-          <label>
-            Description <span aria-hidden="true">*</span>
-            <textarea value={description} onChange={(event) => setDescription(event.target.value)} maxLength={10000} rows={5} required />
-          </label>
-          <label>
-            Repository
-            <select value={repositoryId} onChange={(event) => chooseRepository(event.target.value)} required>
-              {repositories.map((repository) => <option key={repository.id} value={repository.id}>{repository.display_name}</option>)}
-            </select>
-          </label>
-          <label>
-            Base branch
-            <input value={baseBranch} readOnly aria-readonly="true" />
-          </label>
-          <label>
-            Assignee
-            <select value={assigneeId} onChange={(event) => setAssigneeId(event.target.value)} required>
-              {users.map((user) => <option key={user.id} value={user.id}>{user.display_name}</option>)}
-            </select>
-          </label>
-          <label>
-            Jira key <small>optional</small>
-            <input value={jiraKey} onChange={(event) => setJiraKey(event.target.value)} maxLength={80} />
-          </label>
+          <section className="form-section">
+            <h3>Basic information</h3>
+            <label>Title <span aria-hidden="true">*</span>
+              <input value={title} onChange={(event) => setTitle(event.target.value)} maxLength={200} required autoFocus />
+            </label>
+            <label>Description <span aria-hidden="true">*</span>
+              <textarea value={description} onChange={(event) => setDescription(event.target.value)} maxLength={10000} rows={4} required />
+            </label>
+            <div className="form-grid">
+              <label>Repository <span aria-hidden="true">*</span>
+                <select value={repositoryId} onChange={(event) => chooseRepository(event.target.value)} required>
+                  {repositories.map((repository) => <option key={repository.id} value={repository.id}>{repository.display_name}</option>)}
+                </select>
+              </label>
+              <label>Base branch<input value={baseBranch} readOnly aria-readonly="true" /></label>
+              <label>Assignee
+                <select value={assigneeId} onChange={(event) => setAssigneeId(event.target.value)} required>
+                  {users.map((user) => <option key={user.id} value={user.id}>{user.display_name}</option>)}
+                </select>
+              </label>
+              <label>Jira key <small>optional</small>
+                <input value={jiraKey} onChange={(event) => setJiraKey(event.target.value)} maxLength={80} placeholder="e.g. ENG-123" />
+              </label>
+              <label>Starting phase<select value="BRAINSTORM" disabled><option>Brainstorm</option></select></label>
+            </div>
+          </section>
           <fieldset className="optional-tests">
             <legend>Tests <small>optional</small></legend>
+            <p>Human-written requirements are canonical. Claude can convert them into executable task tests.</p>
             <label>
               Acceptance / user stories
               <textarea
@@ -132,38 +151,34 @@ export function NewTaskDialog({ onClose, onCreated }: Props) {
                 onChange={(event) => setTestStories(event.target.value)}
                 maxLength={20000}
                 rows={5}
-                placeholder={"- When quantity is below the minimum, ordering is rejected.\n- Quantity 10 is accepted."}
+                placeholder={"Example:\n- Quantity 10 should be accepted\n- Quantity 15 should be rejected"}
               />
             </label>
-            <label>
-              Upload test files
+            <div className="upload-label">Upload test files</div>
+            <div
+              className="file-drop"
+              role="button"
+              tabIndex={0}
+              onClick={() => fileInput.current?.click()}
+              onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") fileInput.current?.click(); }}
+              onDragOver={(event: DragEvent) => event.preventDefault()}
+              onDrop={(event: DragEvent) => { event.preventDefault(); void selectFiles([...event.dataTransfer.files]); }}
+            >
+              <strong>Drop test files here or Browse</strong>
+              <span>.py .js .ts .json .yaml .yml · up to 10 files</span>
               <input
+                ref={fileInput}
+                className="visually-hidden"
                 type="file"
                 multiple
                 accept=".py,.js,.ts,.json,.yaml,.yml"
-                onChange={async (event) => {
-                  const selected = [...(event.target.files ?? [])];
-                  try {
-                    setTestFiles(
-                      await Promise.all(
-                        selected.map(async (file) => ({
-                          filename: file.name,
-                          content: await file.text(),
-                        })),
-                      ),
-                    );
-                    setError(null);
-                  } catch {
-                    setError("The selected test files could not be read.");
-                  }
-                }}
+                aria-label="Upload test files"
+                onChange={(event) => void selectFiles([...(event.target.files ?? [])])}
               />
-              {testFiles.length > 0 && (
-                <small>{testFiles.map((file) => file.filename).join(", ")}</small>
-              )}
-            </label>
+            </div>
+            {testFiles.length > 0 && <ul className="selected-files">{testFiles.map((file) => <li key={file.filename}><span>{file.filename}</span><button type="button" aria-label={`Remove ${file.filename}`} onClick={() => setTestFiles((current) => current.filter((item) => item.filename !== file.filename))}>×</button></li>)}</ul>}
           </fieldset>
-          <p className="phase-note">Starts in READY. Brainstorm workflow support is coming in Phase 2.</p>
+          <p className="phase-note">Creates a READY task in Brainstorm with an isolated workspace.</p>
           {error && <div className="form-error">{error}</div>}
           {!loading && repositories.length === 0 && <div className="form-error">No repositories are registered.</div>}
           <div className="dialog-actions">

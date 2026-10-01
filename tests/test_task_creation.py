@@ -206,6 +206,10 @@ async def test_safe_catalogs_and_developer_create_task(tmp_path: Path) -> None:
     assert created["workflow_phase"] == "BRAINSTORM"
     assert created["created_by"] == "vakho" and created["workspace_ready"] is True
     assert "workspace" not in created or "workspace_path" not in created
+    async with _client(app, "vakho") as client:
+        detail = await client.get(f"/api/tasks/{created['id']}")
+    assert detail.status_code == 200
+    assert detail.json()["assignee_display_name"] == "Alex"
     record = context.storage.get_task(created["id"])
     assert record is not None and record.repository_id == repository.id
     workspace = context.workspaces.get_path(created["id"])

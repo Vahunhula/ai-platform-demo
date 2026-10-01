@@ -14,14 +14,17 @@ export function DiffTab({
   if (diff === null) return <Empty text="Loading diff…" />;
   if (!workspaceExists) return <Empty text="No workspace exists for this task yet." />;
   if (!diff.trim()) return <Empty text="Workspace is clean." />;
+  const files = [...diff.matchAll(/^diff --git a\/(.+) b\/(.+)$/gm)].map((match) => match[2]);
+  const additions = diff.split("\n").filter((line) => line.startsWith("+") && !line.startsWith("+++")).length;
+  const deletions = diff.split("\n").filter((line) => line.startsWith("-") && !line.startsWith("---")).length;
   return (
-    <pre className="code-block diff">
-      {diff.split("\n").map((line, index) => (
-        <span key={index} className={diffLineClass(line)}>
-          {line + "\n"}
-        </span>
-      ))}
-    </pre>
+    <div className="changes-view">
+      <header><div><h3>{files.length} {files.length === 1 ? "file" : "files"} changed</h3><span className="diff-additions">+{additions}</span> <span className="diff-deletions">−{deletions}</span></div></header>
+      {files.length > 0 && <div className="changed-files">{files.map((file) => <code key={file}>{file}</code>)}</div>}
+      <div className="diff-shell"><div className="diff-toolbar">Unified diff</div><pre className="code-block diff">
+        {diff.split("\n").map((line, index) => <span key={index} className={diffLineClass(line)}>{line + "\n"}</span>)}
+      </pre></div>
+    </div>
   );
 }
 
@@ -44,22 +47,27 @@ export function TestsTab({ taskId, events }: { taskId: string; events: PlatformE
     return () => controller.abort();
   }, [taskId, events]);
   const tests = events.filter((event) => TEST_EVENTS.has(event.event_type));
+  const verification = owned?.latest_verification;
   return (
-    <div className="event-list tests-view">
-      <TestSection title="Human requirements">
+    <div className="tests-view">
+      <header className="tab-title"><div><span className="eyebrow">Quality gates</span><h2>Tests</h2></div>{verification && <span className={`verification-badge verification-${verification.status.toLowerCase()}`}>{verification.status}</span>}</header>
+      <TestSection title="Acceptance Requirements">
         {owned?.human_requirements ? (
-          <pre className="test-evidence">{owned.human_requirements}</pre>
-        ) : <p className="muted">Not provided.</p>}
+          <><pre className="requirements-copy">{owned.human_requirements}</pre><p className="source-line">Source: {owned.requirements_created_by ?? "Unknown"}</p></>
+        ) : <div className="inline-empty"><strong>No tests supplied</strong><span>You can provide acceptance stories when creating a task.</span></div>}
         {owned && owned.generation_status !== "NOT_REQUESTED" && (
           <p className="muted">Generation: {owned.generation_status}{owned.generation_message ? ` — ${owned.generation_message}` : ""}</p>
         )}
       </TestSection>
-      <TestFileSection title="Generated acceptance tests" files={owned?.generated_tests ?? []} />
-      <TestFileSection title="Uploaded test files" files={owned?.uploaded_tests ?? []} />
-      <TestSection title="Repository tests">
+      <TestFileSection title="Generated Acceptance Tests" files={owned?.generated_tests ?? []} empty="No generated acceptance tests yet." />
+      <TestFileSection title="Uploaded Test Files" files={owned?.uploaded_tests ?? []} empty="No test files were uploaded." />
+      <TestSection title="Repository Tests">
         {owned?.repository_tests.length ? <ul>{owned.repository_tests.map((path) => <li key={path}><code>{path}</code></li>)}</ul> : <p className="muted">None found.</p>}
       </TestSection>
-      <h3>Verification</h3>
+      <TestSection title="Repository Verification">
+        {!verification ? <div className="inline-empty"><strong>Not provided</strong><span>No canonical verification result is available yet.</span></div> : <VerificationSummary result={verification} />}
+      </TestSection>
+      <details className="verification-history"><summary>Verification history ({tests.length})</summary>
       {!tests.length && <p className="muted">No persisted verification events yet.</p>}
       {tests.map((event) => {
         const m = event.metadata;
@@ -130,20 +138,32 @@ export function TestsTab({ taskId, events }: { taskId: string; events: PlatformE
           </article>
         );
       })}
+      </details>
     </div>
   );
+}
+
+function VerificationSummary({ result }: { result: NonNullable<TaskTests["latest_verification"]> }) {
+  const rows = [
+    ["Focused tests", result.task_acceptance_status],
+    ["Repository tests", result.broad_regression_passed === null ? "NOT PROVIDED" : result.broad_regression_passed ? "PASS" : "FAIL"],
+    ["Known baseline failures", String(result.baseline_warning_count)],
+    ["New regressions", String(result.new_regression_count)],
+  ];
+  return <div className="verification-summary">{rows.map(([label, value]) => <div key={label}><span>{label}</span><strong className={`result-${value.toLowerCase().replaceAll(" ", "-")}`}>{value}</strong></div>)}<div className="verification-overall"><span>Overall verification</span><strong className={`result-${result.status.toLowerCase()}`}>{result.status}</strong></div></div>;
 }
 
 function TestSection({ title, children }: { title: string; children: ReactNode }) {
   return <section><h3>{title}</h3>{children}</section>;
 }
 
-function TestFileSection({ title, files }: { title: string; files: TaskTests["generated_tests"] }) {
+function TestFileSection({ title, files, empty }: { title: string; files: TaskTests["generated_tests"]; empty: string }) {
   return (
     <TestSection title={title}>
-      {files.length === 0 ? <p className="muted">None.</p> : files.map((file) => (
-        <details key={file.relative_path}>
-          <summary><code>{file.relative_path}</code> · {file.source.toLowerCase()}</summary>
+      {files.length === 0 ? <p className="muted">{empty}</p> : files.map((file) => (
+        <details className="test-file" key={file.relative_path}>
+          <summary><span><code>{file.relative_path}</code><small>{file.source === "UPLOADED" ? `Uploaded by ${file.created_by}` : "Generated by Claude"}</small></span><b>View code</b></summary>
+          {Object.keys(file.requirement_mapping).length > 0 && <div className="requirement-map"><strong>Mapped requirements</strong>{Object.entries(file.requirement_mapping).map(([key, values]) => <p key={key}>{key}: {values.join(", ")}</p>)}</div>}
           <pre className="test-evidence">{file.content}</pre>
         </details>
       ))}
@@ -202,16 +222,14 @@ function ActivityEvent({ event }: { event: PlatformEvent }) {
   const summary = summarizeEvent(event);
   const hasMetadata = Object.keys(event.metadata).length > 0;
   return (
-    <article className="event">
-      <span className="sequence">#{event.sequence_id}</span>
+    <article className="event compact-event">
+      <time>{formatTime(event.timestamp)}</time>
       <div>
         <div className="event-heading">
-          <strong>{event.event_type}</strong>
-          <time>{formatTime(event.timestamp)}</time>
+          <span className="actor" title={event.actor_id}>{event.actor_display_name}</span>
+          <strong>{event.event_type.replaceAll("_", " ").toLowerCase().replace(/^./, (letter) => letter.toUpperCase())}</strong>
+          <span className="sequence">#{event.sequence_id}</span>
         </div>
-        <span className="actor" title={event.actor_id}>
-          {event.actor_display_name} <span className="muted">({event.actor_type})</span>
-        </span>
         {summary && <p className="event-summary">{summary}</p>}
         {hasMetadata && (
           <button className="link-button" onClick={() => setOpen((value) => !value)}>
@@ -276,17 +294,18 @@ export function SummaryTab({
   diff: string | null;
 }) {
   const [evaluation, setEvaluation] = useState<ChecklistEvaluation | null | undefined>(undefined);
+  const [tests, setTests] = useState<TaskTests | null>(null);
 
   useEffect(() => {
     setEvaluation(undefined);
     const controller = new AbortController();
-    api
-      .getChecklists(detail.id, controller.signal)
-      .then((evaluations) => {
+    Promise.all([api.getChecklists(detail.id, controller.signal), api.getTaskTests(detail.id, controller.signal)])
+      .then(([evaluations, taskTests]) => {
         const forPhase = [...evaluations].reverse().find((item) => item.phase === detail.workflow_phase);
         setEvaluation(forPhase ?? evaluations.at(-1) ?? null);
+        setTests(taskTests);
       })
-      .catch(() => setEvaluation(null));
+      .catch(() => { setEvaluation(null); setTests(null); });
     return () => controller.abort();
   }, [detail.id, detail.workflow_phase]);
 
@@ -313,6 +332,10 @@ export function SummaryTab({
         />
         <SummaryFact label="Pending instructions" value={String(detail.queued_messages)} />
       </div>
+
+      <section><h3>Task goal</h3><p>{detail.description}</p></section>
+      <section><h3>Human acceptance stories</h3>{tests?.human_requirements ? <pre className="requirements-copy">{tests.human_requirements}</pre> : <p className="muted">None provided.</p>}</section>
+      <section><h3>Verification summary</h3>{tests?.latest_verification ? <VerificationSummary result={tests.latest_verification} /> : <p className="muted">Not run.</p>}</section>
 
       <section>
         <h3>Readiness</h3>

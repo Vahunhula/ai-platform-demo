@@ -72,12 +72,13 @@ function ChatEntry({ message, own }: { message: ConversationMessage; own: boolea
     return (
       <article className="message phase-result">
         <div className="event-heading">
-          <strong>{message.title}</strong>
+          <span><small className="artifact-label">{message.workflow_phase?.replaceAll("_", " ") ?? "Workflow artifact"}</small><strong>{message.title}</strong></span>
           <time>
             #{message.sequence_id} · {formatTime(message.timestamp)}
           </time>
         </div>
         <p className="phase-result-body">{message.content}</p>
+        {message.readiness_score !== null && <div className="artifact-readiness">Readiness <strong>{message.readiness_score.toFixed(0)}%</strong></div>}
         {(message.artifact_version || message.concrete_model) && (
           <div className="phase-result-meta">
             {message.artifact_version && <span>v{message.artifact_version}</span>}
@@ -355,6 +356,9 @@ export function ChatPanel({ detail, config, user, messages, events, onSubmitted 
       </div>
 
       <div className="composer">
+        {detail.status === "WAITING_FOR_HUMAN" && (
+          <div className="input-required-banner"><span aria-hidden="true">!</span><div><strong>Claude needs your input</strong><small>Reply below so {detail.workflow_phase.replaceAll("_", " ").toLowerCase()} can continue.</small></div></div>
+        )}
         {commandResult && (
           <div className="command-result" role="status">
             <strong>{commandResultNamespace === "claude" ? "Claude command" : "Platform"}</strong>{" "}
@@ -410,7 +414,7 @@ export function ChatPanel({ detail, config, user, messages, events, onSubmitted 
           onKeyDown={onKeyDown}
           placeholder={
             disabledReason ??
-            `Message ${detail.id} as ${user.display_name} (Enter to send, Shift+Enter for a new line)`
+            "Ask or instruct the task…"
           }
           disabled={commandBusy}
           rows={3}
@@ -427,7 +431,7 @@ export function ChatPanel({ detail, config, user, messages, events, onSubmitted 
               ? "Read-only"
               : working
                 ? "Claude is busy; your message will be queued."
-                : `Posting as ${user.display_name} · visible to everyone on this task`}
+                : `Enter to send · Shift+Enter for a new line · / commands · claude/ capabilities`}
           </span>
           <button
             className="send"

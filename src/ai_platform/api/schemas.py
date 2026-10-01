@@ -80,12 +80,20 @@ class CreateTaskRequest(BaseModel):
             raise ValueError("Field must not be blank")
         return value
 
-    @field_validator("jira_key", "acceptance_test_stories")
+    @field_validator("jira_key")
     @classmethod
     def optional_trimmed(cls, value: str | None) -> str | None:
         if value is None:
             return None
         return value.strip() or None
+
+    @field_validator("acceptance_test_stories")
+    @classmethod
+    def preserve_acceptance_stories(cls, value: str | None) -> str | None:
+        """Reject whitespace-only stories without rewriting the human source text."""
+        if value is None:
+            return None
+        return value if value.strip() else None
 
 
 class UploadedTestFileRequest(BaseModel):
@@ -233,6 +241,7 @@ class TaskDetailResponse(TaskListItem):
     # Safe workspace identity for the Workspace tab; never an absolute host path.
     repository_id: str | None = None
     base_branch: str | None = None
+    assignee_display_name: str | None = None
 
 
 class ModelCatalogResponse(BaseModel):

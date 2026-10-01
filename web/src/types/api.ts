@@ -161,6 +161,7 @@ export interface TaskDetail extends TaskListItem {
   remove_disabled_reason: string | null;
   repository_id: string | null;
   base_branch: string | null;
+  assignee_display_name?: string | null;
 }
 
 export interface ReadinessSummary {

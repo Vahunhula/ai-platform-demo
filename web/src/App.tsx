@@ -4,13 +4,13 @@ import { api } from "./api/client";
 import { usePresence } from "./api/usePresence";
 import { type StreamState, useTaskStream } from "./api/useTaskStream";
 import { ChatPanel } from "./components/ChatPanel";
-import { TaskOverview } from "./components/TaskOverview";
 import { ModelRoutingPanel } from "./components/ModelRoutingPanel";
 import { TaskControls } from "./components/TaskControls";
 import { TaskSidebar } from "./components/TaskSidebar";
 import { NewTaskDialog } from "./components/NewTaskDialog";
 import { ActivityTab, DiffTab, SummaryTab, TestsTab, WorkspaceTab } from "./components/tabs";
 import { WorkflowProgress } from "./components/WorkflowProgress";
+import { TaskTabs, type TaskTab } from "./components/TaskTabs";
 import type {
   ConfigResponse,
   ConversationMessage,
@@ -21,9 +21,6 @@ import type {
   CreateTaskResponse,
 } from "./types/api";
 
-type Tab = "Chat" | "Changes" | "Tests" | "Activity" | "Summary" | "Workspace";
-
-const tabs: Tab[] = ["Chat", "Changes", "Tests", "Activity", "Summary", "Workspace"];
 // Events after which the workspace diff may have changed.
 const DIFF_EVENTS = new Set([
   "FILE_CHANGED",
@@ -66,12 +63,6 @@ function initials(name: string): string {
   return (parts.length > 1 ? parts[0][0] + parts[parts.length - 1][0] : name.slice(0, 2)).toUpperCase();
 }
 
-const ROLE_LABEL: Record<CurrentUser["role"], string> = {
-  viewer: "Viewer",
-  developer: "Developer",
-  admin: "Admin",
-};
-
 interface AppProps {
   user: CurrentUser;
   onSignOut: () => void;
@@ -92,7 +83,7 @@ function App({ user, onSignOut }: AppProps) {
   const [diff, setDiff] = useState<string | null>(null);
   // Sequence the live stream starts after; null until the task's history is loaded.
   const [streamAfter, setStreamAfter] = useState<number | null>(null);
-  const [tab, setTab] = useState<Tab>("Chat");
+  const [tab, setTab] = useState<TaskTab>("Chat");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
@@ -321,36 +312,6 @@ function App({ user, onSignOut }: AppProps) {
 
   return (
     <div className="app-shell">
-      <header className="topbar">
-        <div>
-          <span className="eyebrow">Shared TaskSessions</span>
-          <h1>AI Platform</h1>
-        </div>
-        <div className="topbar-actions">
-          <div className="current-user">
-            <span className="avatar" aria-hidden="true">
-              {initials(user.display_name)}
-            </span>
-            <span>
-              <strong>{user.display_name}</strong>
-              <small>
-                {ROLE_LABEL[user.role]}
-                {!user.can_modify_tasks && " · read-only access"}
-              </small>
-            </span>
-            <button className="refresh" onClick={onSignOut}>
-              Log out
-            </button>
-          </div>
-          {streamState !== "idle" && (
-            <span className={`stream-state stream-${streamState}`}>{STREAM_LABEL[streamState]}</span>
-          )}
-          <button className="refresh" onClick={refresh} disabled={loading}>
-            {loading ? "Loading…" : "Refresh"}
-          </button>
-        </div>
-      </header>
-
       <div className="workspace">
         <TaskSidebar
           tasks={tasks}
@@ -358,6 +319,8 @@ function App({ user, onSignOut }: AppProps) {
           onSelect={selectTask}
           onNewTask={() => setCreating(true)}
           canCreate={user.can_modify_tasks}
+          user={user}
+          onSignOut={onSignOut}
         />
 
         <main className="main-content">
@@ -371,11 +334,16 @@ function App({ user, onSignOut }: AppProps) {
                 <div>
                   <span className="task-kicker">{detail.id}</span>
                   <h2>{detail.title}</h2>
+                  <div className="task-header-meta">
+                    <span className={`hero-status status-${detail.status.toLowerCase()}`}>{detail.status.replaceAll("_", " ")}</span>
+                    <strong>{detail.workflow_phase.replaceAll("_", " ")}</strong>
+                    <span>Repository <b>{detail.repository_id ?? "Not set"}</b></span>
+                    <span>Base <b>{detail.base_branch ?? "Not set"}</b></span>
+                    <span>Assignee <b>{detail.assignee_display_name ?? "Unassigned"}</b></span>
+                    {detail.latest_readiness && <span>Readiness <b>{detail.latest_readiness.score.toFixed(0)}%</b></span>}
+                  </div>
                 </div>
                 <div className="header-side">
-                  <span className={`hero-status status-${detail.status.toLowerCase()}`}>
-                    {detail.status}
-                  </span>
                   {viewers.length > 0 && (
                     <div
                       className="presence"
@@ -396,6 +364,8 @@ function App({ user, onSignOut }: AppProps) {
                       </span>
                     </div>
                   )}
+                  {streamState !== "idle" && <span className={`stream-state stream-${streamState}`}>{STREAM_LABEL[streamState]}</span>}
+                  <button className="icon-button" onClick={refresh} disabled={loading} aria-label="Refresh task">↻</button>
                 </div>
               </section>
 
@@ -413,11 +383,6 @@ function App({ user, onSignOut }: AppProps) {
                   {detail.disposition && (
                     <span className="chip">Disposition: {detail.disposition}</span>
                   )}
-                  <span className="chip">Writer: {detail.writer ?? "none"}</span>
-                  <span className="chip">Verification: {detail.verification_status}</span>
-                  <span className="chip">
-                    Model: {[detail.model_tier, detail.model_name].filter(Boolean).join(" / ") || "not selected"}
-                  </span>
                 </div>
                 <TaskControls
                   detail={detail}
@@ -427,23 +392,9 @@ function App({ user, onSignOut }: AppProps) {
               </section>
 
               <WorkflowProgress detail={detail} events={events} />
-              <TaskOverview detail={detail} />
-              <ModelRoutingPanel taskId={detail.id} user={user} />
 
               <section className="activity-panel">
-                <div className="tabs" role="tablist" aria-label="Task activity">
-                  {tabs.map((item) => (
-                    <button
-                      key={item}
-                      role="tab"
-                      aria-selected={tab === item}
-                      className={tab === item ? "active" : ""}
-                      onClick={() => setTab(item)}
-                    >
-                      {item}
-                    </button>
-                  ))}
-                </div>
+                <TaskTabs active={tab} onChange={setTab} />
                 <div className={`tab-body ${tab === "Chat" ? "tab-chat" : ""}`} role="tabpanel">
                   {tab === "Chat" && (
                     <ChatPanel
@@ -470,7 +421,7 @@ function App({ user, onSignOut }: AppProps) {
                     />
                   )}
                   {tab === "Summary" && <SummaryTab detail={detail} messages={messages} diff={diff} />}
-                  {tab === "Workspace" && <WorkspaceTab detail={detail} />}
+                  {tab === "Workspace" && <><WorkspaceTab detail={detail} /><ModelRoutingPanel taskId={detail.id} user={user} /></>}
                 </div>
               </section>
             </>
