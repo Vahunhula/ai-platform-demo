@@ -44,7 +44,15 @@ const STATUS_PILL_LABEL: Record<string, string> = {
 };
 
 /** One Chat-timeline entry, shaped by the backend-owned ``type`` discriminator. */
-function ChatEntry({ message, own }: { message: ConversationMessage; own: boolean }) {
+function ChatEntry({
+  message,
+  own,
+  answered,
+}: {
+  message: ConversationMessage;
+  own: boolean;
+  answered?: boolean;
+}) {
   const heading = (
     <div className="event-heading">
       <strong title={message.actor_id}>
@@ -91,7 +99,7 @@ function ChatEntry({ message, own }: { message: ConversationMessage; own: boolea
 
   if (message.type === "human_input_required") {
     return (
-      <article className="message needs-input">
+      <article className={`message needs-input ${answered ? "answered" : ""}`}>
         <div className="event-heading">
           <strong>{message.title}</strong>
           <time>
@@ -111,7 +119,9 @@ function ChatEntry({ message, own }: { message: ConversationMessage; own: boolea
             ))}
           </ul>
         )}
-        <span className="chip chip-warn">Needs your input</span>
+        <span className={`chip ${answered ? "chip-ok" : "chip-warn"}`}>
+          {answered ? "Answered" : "Needs your input"}
+        </span>
       </article>
     );
   }
@@ -319,9 +329,21 @@ export function ChatPanel({ detail, config, user, messages, events, onSubmitted 
         {messages?.length === 0 && pending.length === 0 && (
           <div className="empty-state">No messages in this task's conversation yet.</div>
         )}
-        {messages?.map((message) => (
-          <ChatEntry message={message} own={message.actor_id === user.username} key={message.id} />
-        ))}
+        {messages?.map((message, index) => {
+          const answered =
+            message.type === "human_input_required" &&
+            messages
+              .slice(index + 1)
+              .some((later) => later.type === "human_message" && later.sequence_id > message.sequence_id);
+          return (
+            <ChatEntry
+              message={message}
+              own={message.actor_id === user.username}
+              answered={answered}
+              key={message.id}
+            />
+          );
+        })}
         {pending.map((item) => (
           <article className="message human own pending" key={item.clientMessageId}>
             <div className="event-heading">
@@ -357,7 +379,7 @@ export function ChatPanel({ detail, config, user, messages, events, onSubmitted 
 
       <div className="composer">
         {detail.status === "WAITING_FOR_HUMAN" && (
-          <div className="input-required-banner"><span aria-hidden="true">!</span><div><strong>Claude needs your input</strong><small>Reply below so {detail.workflow_phase.replaceAll("_", " ").toLowerCase()} can continue.</small></div></div>
+            <div className="input-required-banner"><span aria-hidden="true">!</span><div><strong>Claude needs your input to continue {detail.workflow_phase.replaceAll("_", " ").toLowerCase()}.</strong><small>Answer below and the same phase will resume automatically.</small></div></div>
         )}
         {commandResult && (
           <div className="command-result" role="status">
@@ -414,7 +436,9 @@ export function ChatPanel({ detail, config, user, messages, events, onSubmitted 
           onKeyDown={onKeyDown}
           placeholder={
             disabledReason ??
-            "Ask or instruct the task…"
+            detail.status === "WAITING_FOR_HUMAN"
+              ? "Answer this question..."
+              : "Ask or instruct the task..."
           }
           disabled={commandBusy}
           rows={3}

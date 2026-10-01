@@ -461,8 +461,19 @@ class Presenter:
         score = metadata.get("score")
         keys = [*metadata.get("blocking_failures", []), *metadata.get("blocking_needs_human", [])]
         checks = self._blocking_checks(item.checklist, [str(key) for key in keys])
-        lines = [f"The {phase_label} phase cannot proceed automatically."]
-        if checks:
+        reason = str(metadata.get("reason") or metadata.get("message") or "").strip()
+        question = str(metadata.get("question") or "").strip()
+        related = str(metadata.get("related_requirement") or "").strip()
+        if question:
+            lines = [f"Claude needs your input to continue {phase_label}."]
+            if reason:
+                lines.extend(["", "Why:", self.redactor.text(reason)])
+            lines.extend(["", "Question:", self.redactor.text(question)])
+            if related:
+                lines.extend(["", "Related requirement:", self.redactor.text(related)])
+        else:
+            lines = [f"The {phase_label} phase cannot proceed automatically."]
+        if checks and not question:
             lines.append("")
             lines.append("Questions:")
             for index, check in enumerate(checks, start=1):

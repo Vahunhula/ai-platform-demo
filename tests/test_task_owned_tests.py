@@ -10,11 +10,13 @@ import pytest
 from ai_platform.api.app import create_app
 from ai_platform.application import create_application_context
 from ai_platform.auth import AuthenticatedUser, Role
+from ai_platform.events import EventType
 from ai_platform.executors.base import ExecutionRequest, ExecutionResult
 from ai_platform.identity import HumanIdentity
 from ai_platform.models import TaskDisposition, TaskOrigin, TaskStatus
 from ai_platform.models import TestFileSource as FileSource
 from ai_platform.removal import TaskRemovalService
+from ai_platform.runner import TaskTurnRunner
 from ai_platform.task_creation import CreateTaskCommand, TaskCreationError
 from ai_platform.task_tests import UploadedTestInput
 from ai_platform.workflow import WorkflowPhase
@@ -184,6 +186,44 @@ class NeedsHumanSynthesisExecutor(FakeAgentExecutor):
         return super().execute(request)
 
 
+class ClarifiedSynthesisExecutor(FakeAgentExecutor):
+    def __init__(self) -> None:
+        super().__init__()
+        self.synthesis_stories: list[str] = []
+
+    def execute(self, request: ExecutionRequest) -> ExecutionResult:
+        if request.test_synthesis_stories:
+            self.synthesis_stories.append(request.test_synthesis_stories)
+            if "Supplemental human clarification answers:" not in request.test_synthesis_stories:
+                return ExecutionResult(
+                    succeeded=True,
+                    summary="Fixture details are missing",
+                    structured_output={
+                        "status": "NEEDS_HUMAN",
+                        "message": "Which fixture supplies negative values?",
+                        "requirement_mapping": {},
+                    },
+                )
+            generated = request.workspace_path / (request.test_synthesis_output_dir or "")
+            generated.mkdir(parents=True, exist_ok=True)
+            (generated / "test_generated_negative_values.py").write_text(
+                "def test_negative_values_are_rejected():\n    assert True\n",
+                encoding="utf-8",
+            )
+            return ExecutionResult(
+                succeeded=True,
+                summary="Generated clarified acceptance test",
+                structured_output={
+                    "status": "GENERATED",
+                    "message": "Generated clarified acceptance test",
+                    "requirement_mapping": {
+                        "Negative values are rejected.": ["test_negative_values_are_rejected"],
+                    },
+                },
+            )
+        return super().execute(request)
+
+
 def test_human_story_synthesizes_and_verifies_only_in_own_task(tmp_path: Path) -> None:
     executor = SynthesisExecutor()
     context, app, repository, actor, source = _setup(tmp_path, executor)
@@ -248,6 +288,62 @@ def test_unclear_story_stops_with_needs_human_reason(tmp_path: Path) -> None:
     assert specification.generation_message == "Which fixture supplies negative values?"
     assert context.storage.list_task_test_files(task.task_id) == []
     assert context.storage.get_task(task.task_id).status is TaskStatus.WAITING_FOR_HUMAN
+
+
+def test_test_synthesis_clarification_reply_resumes_same_implementation_phase(
+    tmp_path: Path,
+) -> None:
+    executor = ClarifiedSynthesisExecutor()
+    context, app, repository, actor, _source = _setup(tmp_path, executor)
+    story = "Negative values are rejected."
+    task = app.state.task_creation.create(
+        _command(repository.id, actor.user_id, acceptance_test_stories=story),
+        actor,
+    )
+    human = HumanIdentity(actor_id=actor.user_id, display_name=actor.display_name)
+    context.sessions.start(task.task_id, human)
+
+    record = context.storage.get_task(task.task_id)
+    assert record is not None
+    assert record.status is TaskStatus.WAITING_FOR_HUMAN
+    assert record.workflow_phase is WorkflowPhase.IMPLEMENTATION
+    specification = context.storage.get_test_specification(task.task_id)
+    assert specification is not None
+    assert specification.original_text == story
+    assert specification.generation_status.value == "NEEDS_HUMAN"
+
+    app.state.conversation.submit(
+        task.task_id,
+        "Use the parametrized quantity fixture from tests/test_discounts.py.",
+        "clarify-negative-values",
+        human,
+    )
+    assert TaskTurnRunner(context.sessions, context.storage).run_pending() == 1
+
+    specification = context.storage.get_test_specification(task.task_id)
+    assert specification is not None
+    assert specification.original_text == story
+    assert specification.generation_status.value == "GENERATED"
+    generated = context.storage.list_task_test_files(task.task_id)
+    assert [item.relative_path for item in generated] == [
+        ".ai-platform/tests/generated/test_generated_negative_values.py"
+    ]
+    assert len(executor.synthesis_stories) == 2
+    assert executor.synthesis_stories[0] == story
+    assert story in executor.synthesis_stories[1]
+    assert "Supplemental human clarification answers:" in executor.synthesis_stories[1]
+    assert "Use the parametrized quantity fixture" in executor.synthesis_stories[1]
+    assert context.storage.list_queued_messages(task.task_id)[0].status.value == "completed"
+    phase_transitions = [
+        event.metadata
+        for event in context.storage.get_events(task.task_id)
+        if event.event_type is EventType.WORKFLOW_PHASE_CHANGED
+    ]
+    assert any(
+        event["from_phase"] == WorkflowPhase.IMPLEMENTATION.value
+        and event["to_phase"] == WorkflowPhase.REVIEW.value
+        for event in phase_transitions
+    )
 
 
 def test_disposable_system_task_cleanup_does_not_weaken_user_task(tmp_path: Path) -> None:

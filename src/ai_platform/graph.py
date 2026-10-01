@@ -557,9 +557,31 @@ def _build_graph(
         }
 
     def synthesize_tests(state: TaskGraphState) -> TaskGraphState:
+        def clarification_message(message: str) -> str:
+            stripped = message.strip()
+            if "?" in stripped and len(stripped) > 8:
+                return stripped[:2000]
+            if stripped:
+                return (
+                    "Reason:\n"
+                    f"{stripped[:1500]}\n\n"
+                    "Question:\n"
+                    "What specific expected behavior or repository fixture should the "
+                    "generated acceptance test use?"
+                )[:2000]
+            return (
+                "Reason:\n"
+                "The test synthesis provider returned NEEDS_HUMAN without an actionable "
+                "question.\n\n"
+                "Question:\n"
+                "What specific expected behavior or repository fixture should the generated "
+                "acceptance test use?"
+            )
+
         def needs_human(message: str) -> TaskGraphState:
+            normalized_message = clarification_message(message)
             storage.update_test_generation(
-                task.id, TestGenerationStatus.NEEDS_HUMAN, message[:2000]
+                task.id, TestGenerationStatus.NEEDS_HUMAN, normalized_message
             )
             storage.append_event(
                 Event(
@@ -571,7 +593,11 @@ def _build_graph(
                         "phase": WorkflowPhase.IMPLEMENTATION.value,
                         "execution_id": execution_id,
                         "blocking_needs_human": ["test_synthesis"],
-                        "message": message[:2000],
+                        "reason": normalized_message,
+                        "question": normalized_message,
+                        "related_requirement": specification.original_text[:2000]
+                        if specification
+                        else "",
                     },
                 )
             )
@@ -583,8 +609,16 @@ def _build_graph(
             or specification.generation_status is TestGenerationStatus.GENERATED
         ):
             return {"test_synthesis_ready": True}
+        synthesis_clarifications: list[str] = []
         if specification.generation_status is TestGenerationStatus.NEEDS_HUMAN:
-            return {"test_synthesis_ready": False}
+            synthesis_clarifications = state.get("human_messages", [])
+            if not synthesis_clarifications:
+                return {"test_synthesis_ready": False}
+            storage.update_test_generation(
+                task.id,
+                TestGenerationStatus.PENDING,
+                "Clarification received; regenerating acceptance test.",
+            )
         output_schema = {
             "type": "object",
             "properties": {
@@ -613,7 +647,15 @@ def _build_graph(
                         phase=WorkflowPhase.IMPLEMENTATION,
                         source_commit=baseline_context.source_commit if baseline_context else None,
                         output_schema=output_schema,
-                        test_synthesis_stories=specification.original_text,
+                        test_synthesis_stories=(
+                            specification.original_text
+                            + (
+                                "\n\nSupplemental human clarification answers:\n"
+                                + "\n".join(f"- {item}" for item in synthesis_clarifications)
+                                if synthesis_clarifications
+                                else ""
+                            )
+                        ),
                         test_synthesis_output_dir=GENERATED_TEST_ROOT.as_posix(),
                     )
                 )

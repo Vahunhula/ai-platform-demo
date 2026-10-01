@@ -1206,6 +1206,13 @@ details summary {
   font-weight: 700;
 }
 
+.chip-ok {
+  color: #1d6645;
+  background: #e5f3eb;
+  border-color: #b9dcc8;
+  font-weight: 700;
+}
+
 .controls {
   display: flex;
   flex-direction: column;
@@ -1571,6 +1578,7 @@ button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-vis
 .state-chips { margin-right:auto; }.state-chips:empty{display:none}
 .chip { color:#a2abba; background:#1c212a; border:1px solid #2b323e; }
 .chip-warn { color:#d8b46c; background:#282217; border-color:#4b3d22; }
+.chip-ok { color:#89d8a3; background:#17261c; border-color:#2b5b39; }
 .controls { margin:0; }.control-buttons{align-items:center}
 .control { padding:7px 11px; border-radius:5px; font-size:11px; }
 .control.primary { background:#315ea8; border-color:#4776c5; }
@@ -1595,7 +1603,7 @@ button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-vis
 .message .event-heading { justify-content:flex-start; align-items:baseline; gap:9px; }.message .event-heading strong{color:#c5ccd7}.message .event-heading time{color:#687282}
 .message p { margin-top:7px; color:#d7dce5; font-size:14px; line-height:1.65; }
 .message.phase-result,.message.needs-input { width:min(800px,96%);max-width:800px;padding:18px 20px;background:#141923;border:1px solid #30394a;border-left:3px solid var(--blue);border-radius:7px; }
-.message.needs-input { background:#211c12;border-color:#554421;border-left-color:var(--yellow) }.message.phase-result .event-heading{justify-content:space-between}.message.phase-result .event-heading>span{display:grid;gap:5px}
+.message.needs-input { background:#211c12;border-color:#554421;border-left-color:var(--yellow) }.message.needs-input.answered{background:#151d18;border-color:#294833;border-left-color:#61c083}.message.phase-result .event-heading{justify-content:space-between}.message.phase-result .event-heading>span{display:grid;gap:5px}
 .artifact-label { color:#759ce7;font-size:9px;font-weight:750;letter-spacing:.12em;text-transform:uppercase }.artifact-readiness{width:fit-content;margin-top:12px;padding:4px 7px;color:#8f99a8;background:#1d2330;border-radius:4px;font-size:11px}
 .phase-result-body { white-space:pre-wrap;overflow-wrap:anywhere;font:inherit }.chat-activity{color:#697384}.working{color:#90a8d6;background:#151b27;border-color:#2b3b5a}
 .composer { padding:14px max(24px,calc((100% - 880px)/2)) 16px;background:#11141a;border-color:var(--border) }.composer textarea{padding:12px 13px;color:#e1e5eb;background:#171b23;border:1px solid #343b48;border-radius:7px}.composer textarea::placeholder{color:#747e8d}.composer-footer .muted{font-size:10px}.send{background:#315ea8;border-color:#4776c5;border-radius:5px}
