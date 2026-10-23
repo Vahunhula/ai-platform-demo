@@ -77,6 +77,18 @@ class Settings:
     cookie_secure: bool = False
     # Extra browser origins allowed to send mutations, besides the request's own host.
     allowed_origins: tuple[str, ...] = ()
+    # Demo 3 integration configuration. Provider credentials stay server-side.
+    integration_encryption_key: str | None = None
+    github_app_id: str | None = None
+    github_app_client_id: str | None = None
+    github_app_client_secret: str | None = None
+    github_app_private_key: str | None = None
+    github_app_private_key_path: Path | None = None
+    github_app_webhook_secret: str | None = None
+    github_app_slug: str | None = None
+    jira_oauth_client_id: str | None = None
+    jira_oauth_client_secret: str | None = None
+    jira_oauth_redirect_uri: str | None = None
 
     @classmethod
     def from_env(cls, project_root: Path | None = None) -> "Settings":
@@ -140,4 +152,19 @@ class Settings:
             session_hours=_positive_int(values, "AI_PLATFORM_SESSION_HOURS", 12),
             cookie_secure=_flag(values, "AI_PLATFORM_COOKIE_SECURE"),
             allowed_origins=_origins(values),
+            integration_encryption_key=values.get("AI_PLATFORM_INTEGRATION_ENCRYPTION_KEY") or None,
+            github_app_id=values.get("GITHUB_APP_ID") or None,
+            github_app_client_id=values.get("GITHUB_APP_CLIENT_ID") or None,
+            github_app_client_secret=values.get("GITHUB_APP_CLIENT_SECRET") or None,
+            github_app_private_key=values.get("GITHUB_APP_PRIVATE_KEY") or None,
+            github_app_private_key_path=(
+                _resolve_path(str(values["GITHUB_APP_PRIVATE_KEY_PATH"]), root)
+                if values.get("GITHUB_APP_PRIVATE_KEY_PATH")
+                else None
+            ),
+            github_app_webhook_secret=values.get("GITHUB_APP_WEBHOOK_SECRET") or None,
+            github_app_slug=values.get("GITHUB_APP_SLUG") or None,
+            jira_oauth_client_id=values.get("JIRA_OAUTH_CLIENT_ID") or None,
+            jira_oauth_client_secret=values.get("JIRA_OAUTH_CLIENT_SECRET") or None,
+            jira_oauth_redirect_uri=values.get("JIRA_OAUTH_REDIRECT_URI") or None,
         )

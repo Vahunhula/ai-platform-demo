@@ -9,3 +9,12 @@ it("selects a task from the compact task list", () => {
   fireEvent.click(screen.getByRole("button", { name: /TASK-1/ }));
   expect(onSelect).toHaveBeenCalledWith("TASK-1");
 });
+it("shows integration settings only to administrators", () => {
+  const onOpenIntegrations = vi.fn();
+  const common = { tasks: [], selectedId: null, onSelect: vi.fn(), onNewTask: vi.fn(), canCreate: true, onSignOut: vi.fn(), onOpenIntegrations };
+  const { rerender } = render(<TaskSidebar {...common} user={{ id:"u",username:"v",display_name:"Vakho",role:"developer",can_modify_tasks:true }} />);
+  expect(screen.queryByText(/Settings · Integrations/)).toBeNull();
+  rerender(<TaskSidebar {...common} user={{ id:"a",username:"admin",display_name:"Admin",role:"admin",can_modify_tasks:true }} />);
+  screen.getByText(/Settings · Integrations/).click();
+  expect(onOpenIntegrations).toHaveBeenCalledOnce();
+});

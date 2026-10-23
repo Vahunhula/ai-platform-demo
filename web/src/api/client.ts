@@ -24,6 +24,9 @@ import type {
   ChecklistEvaluation,
   WorkflowArtifactResponse,
   TaskTests,
+  IntegrationConnection,
+  IntegrationHealth,
+  JiraSite,
 } from "../types/api";
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/$/, "");
@@ -95,6 +98,24 @@ export const api = {
     request<CurrentUser>("/api/auth/login", post({ username, token })),
   me: (signal?: AbortSignal) => request<CurrentUser>("/api/auth/me", { signal }),
   logout: () => request<void>("/api/auth/logout", post()),
+  listIntegrations: (signal?: AbortSignal) =>
+    request<IntegrationConnection[]>("/api/integrations", { signal }),
+  startIntegration: (provider: "github" | "jira") =>
+    request<{ authorization_url: string }>(`/api/integrations/${provider}/connect`, post()),
+  checkIntegration: (provider: "github" | "jira") =>
+    request<IntegrationHealth>(`/api/integrations/${provider}/check`, post()),
+  disconnectIntegration: (provider: "github" | "jira") =>
+    request<void>(`/api/integrations/${provider}`, { method: "DELETE" }),
+  getJiraSites: (selectionId: string, signal?: AbortSignal) =>
+    request<{ selection_id: string; sites: JiraSite[] }>(
+      `/api/integrations/jira/sites?selection_id=${encodeURIComponent(selectionId)}`,
+      { signal },
+    ),
+  selectJiraSite: (selectionId: string, cloudId: string) =>
+    request<IntegrationConnection>(
+      "/api/integrations/jira/site",
+      post({ selection_id: selectionId, cloud_id: cloudId }),
+    ),
   heartbeat: (taskId: string) => request<PresenceResponse>(`${task(taskId)}/presence`, post()),
   getConfig: (signal?: AbortSignal) => request<ConfigResponse>("/api/config", { signal }),
   listTasks: (signal?: AbortSignal) => request<TaskListItem[]>("/api/tasks", { signal }),

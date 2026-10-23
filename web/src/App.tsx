@@ -8,6 +8,7 @@ import { ModelRoutingPanel } from "./components/ModelRoutingPanel";
 import { TaskControls } from "./components/TaskControls";
 import { TaskSidebar } from "./components/TaskSidebar";
 import { NewTaskDialog } from "./components/NewTaskDialog";
+import { IntegrationsPage } from "./components/IntegrationsPage";
 import { ActivityTab, DiffTab, SummaryTab, TestsTab, WorkspaceTab } from "./components/tabs";
 import { WorkflowProgress } from "./components/WorkflowProgress";
 import { TaskTabs, type TaskTab } from "./components/TaskTabs";
@@ -87,6 +88,11 @@ function App({ user, onSignOut }: AppProps) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
+  const initialQuery = new URLSearchParams(window.location.search);
+  const [showIntegrations, setShowIntegrations] = useState(
+    user.role === "admin" && initialQuery.get("settings") === "integrations",
+  );
+  const jiraSelectionId = initialQuery.get("jira_selection");
 
   const selectedRef = useRef<string | null>(null);
   selectedRef.current = selectedId;
@@ -241,6 +247,8 @@ function App({ user, onSignOut }: AppProps) {
   };
 
   const selectTask = (taskId: string) => {
+    setShowIntegrations(false);
+    window.history.replaceState({}, "", "/");
     if (taskId === selectedId) return;
     window.clearTimeout(refreshTimer.current);
     setDetail(null);
@@ -321,14 +329,20 @@ function App({ user, onSignOut }: AppProps) {
           canCreate={user.can_modify_tasks}
           user={user}
           onSignOut={onSignOut}
+          onOpenIntegrations={() => {
+            setShowIntegrations(true);
+            window.history.replaceState({}, "", "/?settings=integrations");
+          }}
+          integrationsActive={showIntegrations}
         />
 
         <main className="main-content">
-          {error && <div className="error-banner">{error}</div>}
-          {!detail && !error && (
+          {showIntegrations && <IntegrationsPage jiraSelectionId={jiraSelectionId} />}
+          {!showIntegrations && error && <div className="error-banner">{error}</div>}
+          {!showIntegrations && !detail && !error && (
             <div className="empty-state">{loading ? "Loading…" : "Select a task to inspect it."}</div>
           )}
-          {detail && (
+          {!showIntegrations && detail && (
             <>
               <section className="task-header">
                 <div>

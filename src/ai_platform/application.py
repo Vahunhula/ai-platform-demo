@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from ai_platform.config import Settings
 from ai_platform.events import ActorType, Event, EventType
 from ai_platform.executors import AgentExecutor, ClaudeAgentExecutor
+from ai_platform.integrations import IntegrationService
 from ai_platform.models import TaskDefinition
 from ai_platform.repositories import RepositoryService
 from ai_platform.router import ModelCatalog, ModelRouter
@@ -27,6 +28,7 @@ class ApplicationContext:
     model_catalog: ModelCatalog
     model_router: ModelRouter
     sessions: TaskSessionService
+    integrations: IntegrationService
 
 
 def create_application_context(
@@ -47,6 +49,8 @@ def create_application_context(
     definitions = load_tasks(configured.tasks_path)
     storage = SQLiteStorage(configured.db_path)
     storage.initialize()
+    # Validate the integration credential key before any other startup mutation.
+    integrations = IntegrationService(configured, storage)
     for definition in definitions:
         if storage.create_task(definition):
             storage.append_event(
@@ -81,14 +85,15 @@ def create_application_context(
             )
         )
     return ApplicationContext(
-        configured,
-        definitions,
-        storage,
-        workspaces,
-        repositories,
-        model_catalog,
-        model_router,
-        sessions,
+        settings=configured,
+        definitions=definitions,
+        storage=storage,
+        workspaces=workspaces,
+        repositories=repositories,
+        model_catalog=model_catalog,
+        model_router=model_router,
+        sessions=sessions,
+        integrations=integrations,
     )
 
 

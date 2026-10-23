@@ -405,6 +405,12 @@ recommended.
 | `AI_PLATFORM_USER` | OS username (development only) |
 | `ANTHROPIC_API_KEY` | unset |
 
+GitHub App and Jira Cloud integration settings are optional. With no provider
+configuration the platform starts normally and Settings → Integrations shows
+"Not configured." See [Demo 3 integrations](docs/demo3-integrations.md) for the
+server-only variables, exact permissions/scopes, callbacks, webhooks, and key
+backup requirements.
+
 ## Tests
 
 Automated tests use `FakeAgentExecutor`; they never invoke real Claude:

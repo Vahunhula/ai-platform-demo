@@ -17,6 +17,51 @@ export interface CurrentUser {
   can_modify_tasks: boolean;
 }
 
+export type IntegrationProvider = "GITHUB" | "JIRA";
+export type IntegrationStatus =
+  | "NOT_CONFIGURED"
+  | "NOT_CONNECTED"
+  | "CONNECTED"
+  | "DEGRADED"
+  | "DISCONNECTED"
+  | "REAUTH_REQUIRED";
+
+export interface IntegrationConnection {
+  provider: IntegrationProvider;
+  configured: boolean;
+  status: IntegrationStatus;
+  display_name: string | null;
+  account: { id: string | null; name: string | null } | null;
+  site: { id: string | null; name: string; url: string | null } | null;
+  metadata: {
+    installation_id?: number;
+    account_type?: string;
+    repository_selection?: string;
+    repository_count?: number;
+    scopes?: string[];
+  };
+  last_checked_at: string | null;
+  safe_error: string | null;
+}
+
+export interface IntegrationHealth {
+  healthy: boolean;
+  checked_at: string | null;
+  account: IntegrationConnection["account"];
+  site: IntegrationConnection["site"];
+  repository_count: number | null;
+  scopes: string[];
+  safe_error: string | null;
+  status: IntegrationStatus;
+}
+
+export interface JiraSite {
+  id: string;
+  name: string;
+  url: string;
+  scopes: string[];
+}
+
 export interface PresenceUser {
   user_id: string;
   username: string;

@@ -17,11 +17,13 @@ from ai_platform.api.routes.commands import router as commands_router
 from ai_platform.api.routes.config import router as config_router
 from ai_platform.api.routes.controls import router as controls_router
 from ai_platform.api.routes.health import router as health_router
+from ai_platform.api.routes.integrations import router as integrations_router
 from ai_platform.api.routes.messages import router as messages_router
 from ai_platform.api.routes.models import router as models_router
 from ai_platform.api.routes.presence import router as presence_router
 from ai_platform.api.routes.stream import router as stream_router
 from ai_platform.api.routes.tasks import router as tasks_router
+from ai_platform.api.routes.webhooks import router as webhooks_router
 from ai_platform.api.security import SameOriginMutationMiddleware, require_user
 from ai_platform.application import ApplicationContext, create_application_context
 from ai_platform.auth import AuthService, InvalidCredentialsError
@@ -43,6 +45,12 @@ from ai_platform.conversation import (
     ConversationService,
     IdempotencyConflictError,
     MessageNotAcceptedError,
+)
+from ai_platform.integrations.models import (
+    IntegrationAuthenticationError,
+    IntegrationConfigurationError,
+    IntegrationError,
+    OAuthStateError,
 )
 from ai_platform.model_preferences import ModelPreferenceService
 from ai_platform.presence import PresenceService
@@ -238,6 +246,26 @@ def create_app(
     async def provisioning_error(_request: Request, exc: TaskProvisioningError) -> JSONResponse:
         return error(503, str(exc))
 
+    @application.exception_handler(IntegrationAuthenticationError)
+    async def integration_authentication_error(
+        _request: Request, exc: IntegrationAuthenticationError
+    ) -> JSONResponse:
+        return error(401, str(exc))
+
+    @application.exception_handler(OAuthStateError)
+    async def oauth_state_error(_request: Request, exc: OAuthStateError) -> JSONResponse:
+        return error(400, str(exc))
+
+    @application.exception_handler(IntegrationConfigurationError)
+    async def integration_configuration_error(
+        _request: Request, exc: IntegrationConfigurationError
+    ) -> JSONResponse:
+        return error(503, str(exc))
+
+    @application.exception_handler(IntegrationError)
+    async def integration_error(_request: Request, exc: IntegrationError) -> JSONResponse:
+        return error(400, str(exc))
+
     @application.exception_handler(Exception)
     async def unexpected_error(request: Request, _exc: Exception) -> JSONResponse:
         # Details (paths, Git output, tracebacks) stay in the server log only.
@@ -247,6 +275,11 @@ def create_app(
     # Unauthenticated: health and the auth endpoints (login decides for itself).
     application.include_router(health_router, prefix="/api")
     application.include_router(auth_router, prefix="/api")
+    application.include_router(webhooks_router, prefix="/api")
+    # Integration management routes carry their own admin dependencies; OAuth
+    # callbacks instead authenticate the one-time state because SameSite=Strict
+    # intentionally withholds the normal session after provider navigation.
+    application.include_router(integrations_router, prefix="/api")
     # Everything else requires a live session (401); mutations add role checks (403).
     for router in (
         config_router,

@@ -54,6 +54,19 @@ def require_developer(user: UserDependency) -> AuthenticatedUser:
 DeveloperDependency = Annotated[AuthenticatedUser, Depends(require_developer)]
 
 
+def require_admin(user: UserDependency) -> AuthenticatedUser:
+    """External credential and connection management is administrator-only."""
+
+    if user.role.value != "admin":
+        raise HTTPException(
+            status_code=403, detail="Administrator access is required to manage integrations."
+        )
+    return user
+
+
+AdminDependency = Annotated[AuthenticatedUser, Depends(require_admin)]
+
+
 def set_session_cookie(response: Response, secret: str, *, max_age: int, secure: bool) -> None:
     response.set_cookie(
         SESSION_COOKIE,

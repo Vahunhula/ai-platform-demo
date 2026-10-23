@@ -10,6 +10,8 @@ interface Props {
   canCreate: boolean;
   user: CurrentUser;
   onSignOut: () => void;
+  onOpenIntegrations?: () => void;
+  integrationsActive?: boolean;
 }
 
 const PHASE: Record<string, string> = {
@@ -24,7 +26,7 @@ function stateLabel(task: TaskListItem): string {
   return task.status.replaceAll("_", " ").toLowerCase().replace(/^./, (letter) => letter.toUpperCase());
 }
 
-export function TaskSidebar({ tasks, selectedId, onSelect, onNewTask, canCreate, user, onSignOut }: Props) {
+export function TaskSidebar({ tasks, selectedId, onSelect, onNewTask, canCreate, user, onSignOut, onOpenIntegrations = () => undefined, integrationsActive = false }: Props) {
   const [query, setQuery] = useState("");
   const filtered = useMemo(() => {
     const value = query.trim().toLowerCase();
@@ -58,6 +60,14 @@ export function TaskSidebar({ tasks, selectedId, onSelect, onNewTask, canCreate,
         ))}
         {filtered.length === 0 && <p className="sidebar-empty">No matching tasks</p>}
       </nav>
+      {user.role === "admin" && (
+        <button
+          className={`settings-link ${integrationsActive ? "active" : ""}`}
+          onClick={onOpenIntegrations}
+        >
+          <span aria-hidden="true">⚙</span> Settings · Integrations
+        </button>
+      )}
       <div className="sidebar-account">
         <span className="avatar">{user.display_name.slice(0, 2).toUpperCase()}</span>
         <span><strong>{user.display_name}</strong><small>{user.role}</small></span>

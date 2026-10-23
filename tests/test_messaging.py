@@ -461,12 +461,13 @@ async def test_agent_failure_is_persisted_and_history_is_kept(tmp_path: Path) ->
         detail = (await client.get("/api/tasks/DEMO-1")).json()
         rejected = await _post(client, "DEMO-1", "Another one", "key-failure-2")
 
-    failed = messages[-1]
+    failed = next(message for message in messages if message["content"] == "This turn will crash")
     assert failed["content"] == "This turn will crash"
     assert failed["status"] == "FAILED"
     assert "FAILED" in failed["error"]
     assert detail["status"] == "FAILED"
     assert _events(exploding, "DEMO-1", EventType.TASK_FAILED)
+    assert messages[-1]["type"] == "platform_activity"
     assert rejected.status_code == 409
     assert any(m["content"] == "Fake executor completed" for m in messages)  # history kept
 
